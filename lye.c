@@ -16,11 +16,12 @@
 /* Definiciones de teclas de control */
 #define KEY_CTRL(x) ((x) & 0x1F)
 #define KEY_CTRL_SLASH 0x1F   /* Ctrl+/ (0x1F) */
+#define KEY_CTRL_S     19     /* Ctrl+S */
 
 /* Estructura principal del editor */
 typedef struct {
     char **buffer;          /* Líneas del archivo (sin '\n') */
-    int num_lines;          /* Número de líneas en el buffer */
+    int num_lines;          /* Número de líneas reales en el buffer */
     int cursor_x, cursor_y; /* Posición del cursor (columna, fila) */
     int top_line;           /* Primera línea visible en pantalla */
     int left_col;           /* Primera columna visible */
@@ -32,16 +33,16 @@ typedef struct {
     char **clipboard;
     int clipboard_lines;
     /* Historial para deshacer/rehacer */
-    char ***history;        /* Pila de estados (cada estado es un buffer completo) */
-    int *history_num_lines; /* Número de líneas de cada estado */
-    int history_count;      /* Número de estados en la pila */
-    int history_index;      /* Índice actual en la pila (posición del estado actual) */
-    int max_history;        /* Límite máximo de estados */
+    char ***history;
+    int *history_num_lines;
+    int history_count;
+    int history_index;
+    int max_history;
     /* Búsqueda */
-    char last_search[256];  /* Última búsqueda realizada */
+    char last_search[256];
 } Editor;
 
-/* Prototipos de funciones */
+/* Prototipos */
 void init_curses(void);
 void cleanup(void);
 void handle_resize(int sig);
@@ -68,15 +69,16 @@ void goto_line(Editor *ed);
 void confirm_exit(Editor *ed);
 void handle_input(Editor *ed, int ch);
 int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen);
+int read_filename_with_default(Editor *ed, const char *prompt, char *buffer, int maxlen, const char *def);
 char **duplicate_buffer(Editor *ed, int *num_lines_out);
 char **duplicate_buffer_from_history(Editor *ed, int index, int *num_lines_out);
 char *my_strdup(const char *s);
 int read_file_line(FILE *fp, char **line, size_t *len);
+void adjust_view(Editor *ed);
+void draw_truncated_utf8(int y, int x, int max_bytes, const char *text);
 
-/* Variables globales para señales */
 Editor *global_ed = NULL;
 
-/* Implementación de strdup (C11 estándar) */
 char *my_strdup(const char *s) {
     size_t len = strlen(s) + 1;
     char *p = malloc(len);
@@ -84,7 +86,6 @@ char *my_strdup(const char *s) {
     return p;
 }
 
-/* Leer una línea de archivo de forma dinámica (sin getline) */
 int read_file_line(FILE *fp, char **line, size_t *len) {
     size_t capacity = 128;
     size_t size = 0;
@@ -92,9 +93,7 @@ int read_file_line(FILE *fp, char **line, size_t *len) {
     if (!buffer) return -1;
     int c;
     while ((c = fgetc(fp)) != EOF) {
-        if (c == '\n') {
-            break;
-        }
+        if (c == '\n') break;
         if (size + 1 >= capacity) {
             capacity *= 2;
             char *new_buffer = realloc(buffer, capacity);
@@ -116,7 +115,20 @@ int read_file_line(FILE *fp, char **line, size_t *len) {
     return size;
 }
 
-/* Inicializar ncurses */
+/* Trunca una cadena UTF-8 a un máximo de bytes sin cortar en medio de un carácter */
+void draw_truncated_utf8(int y, int x, int max_bytes, const char *text) {
+    if (max_bytes <= 0) return;
+    size_t len = strlen(text);
+    if (len <= (size_t)max_bytes) {
+        mvaddstr(y, x, text);
+        return;
+    }
+    /* Encontrar el último byte válido de UTF-8 */
+    size_t end = max_bytes;
+    while (end > 0 && (text[end] & 0xC0) == 0x80) end--;
+    mvaddnstr(y, x, text, (int)end);
+}
+
 void init_curses(void) {
     initscr();
     raw();
@@ -126,61 +138,83 @@ void init_curses(void) {
     if (has_colors()) {
         start_color();
         use_default_colors();
-        init_pair(1, COLOR_WHITE, COLOR_BLUE);   /* Barra superior */
-        init_pair(2, COLOR_YELLOW, COLOR_BLACK); /* Números de línea */
-        init_pair(3, COLOR_CYAN, COLOR_BLACK);   /* Barra de estado */
-        init_pair(4, COLOR_BLACK, COLOR_WHITE);  /* Barra de atajos */
-        init_pair(5, COLOR_RED, COLOR_BLACK);    /* Mensajes de error */
+        init_pair(1, COLOR_WHITE, COLOR_BLUE);
+        init_pair(2, COLOR_GREEN, COLOR_BLACK);
+        init_pair(3, COLOR_CYAN, COLOR_BLACK);
+        init_pair(4, COLOR_BLACK, COLOR_WHITE);
+        init_pair(5, COLOR_RED, COLOR_BLACK);
     }
 }
 
-/* Restaurar terminal */
 void cleanup(void) {
     endwin();
 }
 
-/* Manejar señal de redimensionamiento */
 void handle_resize(int sig) {
-    (void)sig; /* Evitar warning de parámetro no usado */
+    (void)sig;
     if (global_ed) {
         endwin();
         refresh();
-        clear();
+        clearok(stdscr, TRUE);
+        adjust_view(global_ed);
         draw_screen(global_ed);
     }
 }
 
-/* Liberar buffer del editor */
+void adjust_view(Editor *ed) {
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+    int edit_rows = rows - 3; /* filas visibles para edición */
+    int line_num_width = 1;
+    int total_lines = ed->num_lines + 1;
+    int temp = total_lines;
+    while (temp >= 10) { temp /= 10; line_num_width++; }
+    line_num_width++;
+    int edit_cols = cols - line_num_width - 1;
+
+    /* Ajustar top_line para que el cursor sea visible */
+    if (ed->cursor_y < ed->top_line) {
+        ed->top_line = ed->cursor_y;
+    }
+    if (ed->cursor_y >= ed->top_line + edit_rows) {
+        ed->top_line = ed->cursor_y - edit_rows + 1;
+    }
+    if (ed->top_line < 0) ed->top_line = 0;
+    if (ed->top_line > total_lines - edit_rows) ed->top_line = total_lines - edit_rows;
+    if (ed->top_line < 0) ed->top_line = 0;
+
+    /* Ajustar left_col para que el cursor sea visible */
+    if (ed->cursor_x < ed->left_col) {
+        ed->left_col = ed->cursor_x;
+    }
+    if (ed->cursor_x >= ed->left_col + edit_cols) {
+        ed->left_col = ed->cursor_x - edit_cols + 1;
+    }
+    if (ed->left_col < 0) ed->left_col = 0;
+}
+
 void free_buffer(Editor *ed) {
     if (ed->buffer) {
-        for (int i = 0; i < ed->num_lines; i++) {
-            free(ed->buffer[i]);
-        }
+        for (int i = 0; i < ed->num_lines; i++) free(ed->buffer[i]);
         free(ed->buffer);
         ed->buffer = NULL;
     }
     ed->num_lines = 0;
 }
 
-/* Liberar portapapeles */
 void free_clipboard(Editor *ed) {
     if (ed->clipboard) {
-        for (int i = 0; i < ed->clipboard_lines; i++) {
-            free(ed->clipboard[i]);
-        }
+        for (int i = 0; i < ed->clipboard_lines; i++) free(ed->clipboard[i]);
         free(ed->clipboard);
         ed->clipboard = NULL;
         ed->clipboard_lines = 0;
     }
 }
 
-/* Liberar historial */
 void free_history(Editor *ed) {
     if (ed->history) {
         for (int i = 0; i < ed->history_count; i++) {
-            for (int j = 0; j < ed->history_num_lines[i]; j++) {
-                free(ed->history[i][j]);
-            }
+            for (int j = 0; j < ed->history_num_lines[i]; j++) free(ed->history[i][j]);
             free(ed->history[i]);
         }
         free(ed->history);
@@ -192,7 +226,6 @@ void free_history(Editor *ed) {
     }
 }
 
-/* Copiar buffer completo a un nuevo estado para historial */
 char **duplicate_buffer(Editor *ed, int *num_lines_out) {
     char **copy = malloc(ed->num_lines * sizeof(char *));
     if (!copy) return NULL;
@@ -208,20 +241,15 @@ char **duplicate_buffer(Editor *ed, int *num_lines_out) {
     return copy;
 }
 
-/* Guardar estado actual en historial (antes de modificar) */
 void push_history(Editor *ed) {
     if (ed->history_count >= ed->max_history) {
-        /* Eliminar el estado más antiguo */
-        for (int j = 0; j < ed->history_num_lines[0]; j++) {
-            free(ed->history[0][j]);
-        }
+        for (int j = 0; j < ed->history_num_lines[0]; j++) free(ed->history[0][j]);
         free(ed->history[0]);
         memmove(ed->history, ed->history + 1, (ed->history_count - 1) * sizeof(char **));
         memmove(ed->history_num_lines, ed->history_num_lines + 1, (ed->history_count - 1) * sizeof(int));
         ed->history_count--;
         if (ed->history_index > 0) ed->history_index--;
     }
-    /* Agregar nuevo estado al final */
     int num_lines_copy;
     char **copy = duplicate_buffer(ed, &num_lines_copy);
     if (!copy) return;
@@ -231,17 +259,13 @@ void push_history(Editor *ed) {
     ed->history_num_lines[ed->history_count] = num_lines_copy;
     ed->history_count++;
     ed->history_index = ed->history_count - 1;
-    /* Limpiar rehacer (estados después del índice actual) */
     for (int i = ed->history_index + 1; i < ed->history_count; i++) {
-        for (int j = 0; j < ed->history_num_lines[i]; j++) {
-            free(ed->history[i][j]);
-        }
+        for (int j = 0; j < ed->history_num_lines[i]; j++) free(ed->history[i][j]);
         free(ed->history[i]);
     }
     ed->history_count = ed->history_index + 1;
 }
 
-/* Función auxiliar para duplicar buffer desde historial */
 char **duplicate_buffer_from_history(Editor *ed, int index, int *num_lines_out) {
     char **copy = malloc(ed->history_num_lines[index] * sizeof(char *));
     if (!copy) return NULL;
@@ -257,40 +281,46 @@ char **duplicate_buffer_from_history(Editor *ed, int index, int *num_lines_out) 
     return copy;
 }
 
-/* Deshacer último cambio */
 void undo(Editor *ed) {
     if (ed->history_index > 0) {
         ed->history_index--;
         free_buffer(ed);
         ed->buffer = duplicate_buffer_from_history(ed, ed->history_index, &ed->num_lines);
         ed->modified = 1;
+        if (ed->cursor_y > ed->num_lines) ed->cursor_y = ed->num_lines;
+        if (ed->cursor_x > (int)strlen(ed->buffer[ed->cursor_y < ed->num_lines ? ed->cursor_y : ed->num_lines-1])) {
+            ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y < ed->num_lines ? ed->cursor_y : ed->num_lines-1]);
+        }
+        adjust_view(ed);
         draw_screen(ed);
     } else {
         draw_status_bar(ed, "Nada que deshacer");
     }
 }
 
-/* Rehacer */
 void redo(Editor *ed) {
     if (ed->history_index < ed->history_count - 1) {
         ed->history_index++;
         free_buffer(ed);
         ed->buffer = duplicate_buffer_from_history(ed, ed->history_index, &ed->num_lines);
         ed->modified = 1;
+        if (ed->cursor_y > ed->num_lines) ed->cursor_y = ed->num_lines;
+        if (ed->cursor_x > (int)strlen(ed->buffer[ed->cursor_y < ed->num_lines ? ed->cursor_y : ed->num_lines-1])) {
+            ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y < ed->num_lines ? ed->cursor_y : ed->num_lines-1]);
+        }
+        adjust_view(ed);
         draw_screen(ed);
     } else {
         draw_status_bar(ed, "Nada que rehacer");
     }
 }
 
-/* Cargar archivo en buffer */
 void load_file(Editor *ed, const char *filename) {
     FILE *fp = fopen(filename, "r");
     if (!fp) {
         draw_status_bar(ed, "Error al abrir archivo");
         return;
     }
-    /* Liberar buffer anterior */
     free_buffer(ed);
     ed->buffer = NULL;
     ed->num_lines = 0;
@@ -303,7 +333,7 @@ void load_file(Editor *ed, const char *filename) {
         free(line);
         line = NULL;
     }
-    free(line); /* por si acaso */
+    free(line);
     fclose(fp);
     if (ed->num_lines == 0) {
         ed->buffer = malloc(sizeof(char *));
@@ -316,9 +346,9 @@ void load_file(Editor *ed, const char *filename) {
     ed->cursor_y = 0;
     ed->top_line = 0;
     ed->left_col = 0;
+    adjust_view(ed);
 }
 
-/* Guardar buffer en archivo, asegurando salto de línea final */
 int save_file(Editor *ed, const char *filename) {
     FILE *fp = fopen(filename, "w");
     if (!fp) {
@@ -327,14 +357,9 @@ int save_file(Editor *ed, const char *filename) {
     }
     for (int i = 0; i < ed->num_lines; i++) {
         fputs(ed->buffer[i], fp);
-        if (i < ed->num_lines - 1) {
-            fputc('\n', fp);
-        }
+        if (i < ed->num_lines - 1) fputc('\n', fp);
     }
-    /* Asegurar salto de línea final si el buffer no termina con nueva línea */
     if (ed->num_lines > 0 && ed->buffer[ed->num_lines-1][0] != '\0') {
-        fputc('\n', fp);
-    } else if (ed->num_lines == 0) {
         fputc('\n', fp);
     }
     fclose(fp);
@@ -344,8 +369,8 @@ int save_file(Editor *ed, const char *filename) {
     return 1;
 }
 
-/* Dibujar pantalla completa */
 void draw_screen(Editor *ed) {
+    adjust_view(ed); /* Asegurar que la vista es correcta */
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
     erase();
@@ -353,39 +378,44 @@ void draw_screen(Editor *ed) {
     /* Barra superior */
     attron(A_REVERSE);
     mvhline(0, 0, ' ', cols);
-    char title[256];
+    char title[512];
     if (ed->filename) {
         snprintf(title, sizeof(title), " lye - Lynds Editor    %s%s", ed->filename, ed->modified ? " (modificado)" : "");
     } else {
         snprintf(title, sizeof(title), " lye - Lynds Editor    Búfer nuevo%s", ed->modified ? " (modificado)" : "");
     }
-    mvprintw(0, 2, "%s", title);
+    draw_truncated_utf8(0, 2, cols - 4, title);
     attroff(A_REVERSE);
 
     /* Área de edición */
+    int total_lines = ed->num_lines + 1;
     int line_num_width = 1;
-    int temp = ed->num_lines;
-    while (temp >= 10) {
-        temp /= 10;
-        line_num_width++;
-    }
-    line_num_width++; /* espacio extra */
+    int temp = total_lines;
+    while (temp >= 10) { temp /= 10; line_num_width++; }
+    line_num_width++;
 
     int edit_rows = rows - 3;
     int edit_cols = cols - line_num_width - 1;
 
-    for (int i = 0; i < edit_rows && (ed->top_line + i) < ed->num_lines; i++) {
+    for (int i = 0; i < edit_rows; i++) {
         int line_index = ed->top_line + i;
-        attron(COLOR_PAIR(2));
-        mvprintw(i + 1, 1, "%*d", line_num_width - 1, line_index + 1);
-        attroff(COLOR_PAIR(2));
-        char *line = ed->buffer[line_index];
-        int len = (int)strlen(line);
-        int display_len = len - ed->left_col;
-        if (display_len < 0) display_len = 0;
-        if (display_len > edit_cols) display_len = edit_cols;
-        if (display_len > 0) {
-            mvaddnstr(i + 1, line_num_width + 1, line + ed->left_col, display_len);
+        if (line_index >= total_lines) break;
+        if (line_index < ed->num_lines) {
+            attron(COLOR_PAIR(2));
+            mvprintw(i + 1, 1, "%*d", line_num_width - 1, line_index + 1);
+            attroff(COLOR_PAIR(2));
+            char *line = ed->buffer[line_index];
+            int len = (int)strlen(line);
+            int display_len = len - ed->left_col;
+            if (display_len < 0) display_len = 0;
+            if (display_len > edit_cols) display_len = edit_cols;
+            if (display_len > 0) {
+                mvaddnstr(i + 1, line_num_width + 1, line + ed->left_col, display_len);
+            }
+        } else {
+            attron(COLOR_PAIR(2));
+            mvprintw(i + 1, 1, "%*d", line_num_width - 1, line_index + 1);
+            attroff(COLOR_PAIR(2));
         }
     }
 
@@ -393,25 +423,37 @@ void draw_screen(Editor *ed) {
     attron(COLOR_PAIR(3));
     mvhline(rows - 2, 0, ' ', cols);
     if (ed->message[0] != '\0' && ed->msg_timeout > 0) {
-        mvprintw(rows - 2, 1, "%s", ed->message);
+        draw_truncated_utf8(rows - 2, 1, cols - 2, ed->message);
         ed->msg_timeout--;
         if (ed->msg_timeout == 0) ed->message[0] = '\0';
     } else if (ed->modified) {
-        mvprintw(rows - 2, 1, "Modificado");
-    } else {
-        mvprintw(rows - 2, 1, " ");
+        draw_truncated_utf8(rows - 2, 1, cols - 2, "Modificado");
     }
     attroff(COLOR_PAIR(3));
 
-    /* Barra de atajos */
+    /* Barra de atajos adaptativa */
     attron(A_REVERSE);
     mvhline(rows - 1, 0, ' ', cols);
-    mvprintw(rows - 1, 1, "^G Ayuda  ^O Guardar ^F Buscar  ^K Cortar  ^U Pegar  ^Z Deshacer ^Y Rehacer ^/ Ir línea ^X Salir");
+    const char *shortcuts;
+    if (cols >= 90) {
+        shortcuts = "^G Ayuda  ^S Guardar ^O Guardar como ^F Buscar  ^K Cortar  ^U Pegar  ^Z Deshacer ^Y Rehacer ^/ Ir línea ^X Salir";
+    } else if (cols >= 60) {
+        shortcuts = "^G Ayuda  ^S Guardar ^F Buscar  ^K Cortar  ^U Pegar  ^Z Deshacer ^X Salir";
+    } else if (cols >= 30) {
+        shortcuts = "^G Ayuda ^S Guardar ^X Salir";
+    } else {
+        shortcuts = "^G ^X";
+    }
+    draw_truncated_utf8(rows - 1, 1, cols - 2, shortcuts);
     attroff(A_REVERSE);
 
+    /* Colocar cursor */
     int cursor_screen_y = ed->cursor_y - ed->top_line + 1;
     int cursor_screen_x = ed->cursor_x - ed->left_col + line_num_width + 1;
     if (cursor_screen_y >= 1 && cursor_screen_y <= edit_rows) {
+        if (ed->cursor_y == ed->num_lines && ed->num_lines > 0) {
+            cursor_screen_x = line_num_width + 1;
+        }
         move(cursor_screen_y, cursor_screen_x);
     } else {
         move(1, line_num_width + 1);
@@ -419,28 +461,27 @@ void draw_screen(Editor *ed) {
     refresh();
 }
 
-/* Mostrar mensaje en barra de estado */
 void draw_status_bar(Editor *ed, const char *msg) {
     strncpy(ed->message, msg, sizeof(ed->message) - 1);
     ed->message[sizeof(ed->message) - 1] = '\0';
     ed->msg_timeout = 50;
 }
 
-/* Mostrar pantalla de ayuda */
 void show_help(Editor *ed) {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
     erase();
     attron(A_REVERSE);
     mvhline(0, 0, ' ', cols);
-    mvprintw(0, 2, " Ayuda de lye - Lynds Editor ");
+    draw_truncated_utf8(0, 2, cols - 4, " Ayuda de lye - Lynds Editor ");
     attroff(A_REVERSE);
 
     const char *help_lines[] = {
         "Atajos de teclado principales:",
         "",
         "^G   Mostrar esta ayuda",
-        "^O   Guardar archivo",
+        "^S   Guardar archivo",
+        "^O   Guardar como (pregunta nombre)",
         "^F   Buscar texto",
         "^W   Buscar siguiente (después de ^F)",
         "^K   Cortar línea actual",
@@ -454,18 +495,19 @@ void show_help(Editor *ed) {
         "Movimiento: flechas, Inicio, Fin, RePág, AvPág",
         "Edición: Insertar, Supr, Retroceso, Enter",
         "",
+        "Hay una línea vacía siempre disponible al final.",
+        "",
         "Presione cualquier tecla para volver..."
     };
     int n = sizeof(help_lines) / sizeof(help_lines[0]);
     for (int i = 0; i < n && i < rows - 2; i++) {
-        mvprintw(i + 2, 2, "%s", help_lines[i]);
+        draw_truncated_utf8(i + 2, 2, cols - 4, help_lines[i]);
     }
     refresh();
     getch();
     draw_screen(ed);
 }
 
-/* Leer una línea de texto del usuario en la barra de estado */
 int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen) {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
@@ -473,9 +515,9 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
     curs_set(1);
     attron(COLOR_PAIR(3));
     mvhline(rows - 2, 0, ' ', cols);
-    mvprintw(rows - 2, 1, "%s", prompt);
+    draw_truncated_utf8(rows - 2, 1, cols - 2, prompt);
     attroff(COLOR_PAIR(3));
-    move(rows - 2, 1 + strlen(prompt));
+    move(rows - 2, 1 + (int)strlen(prompt));
     refresh();
     int result = getnstr(buffer, maxlen - 1);
     noecho();
@@ -484,8 +526,30 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
     return result;
 }
 
-/* Insertar carácter en posición actual */
+int read_filename_with_default(Editor *ed, const char *prompt, char *buffer, int maxlen, const char *def) {
+    char full_prompt[512];
+    if (def && def[0]) {
+        snprintf(full_prompt, sizeof(full_prompt), "%s [%s]: ", prompt, def);
+    } else {
+        snprintf(full_prompt, sizeof(full_prompt), "%s: ", prompt);
+    }
+    int result = read_line_from_user(ed, full_prompt, buffer, maxlen);
+    if (result == OK && buffer[0] == '\0' && def && def[0]) {
+        strncpy(buffer, def, maxlen);
+        buffer[maxlen-1] = '\0';
+    }
+    return result;
+}
+
 void insert_char(Editor *ed, char c) {
+    if (ed->cursor_y == ed->num_lines) {
+        push_history(ed);
+        ed->buffer = realloc(ed->buffer, (ed->num_lines + 1) * sizeof(char *));
+        ed->buffer[ed->num_lines] = my_strdup("");
+        ed->num_lines++;
+        ed->cursor_y = ed->num_lines - 1;
+        ed->cursor_x = 0;
+    }
     push_history(ed);
     size_t line_len = strlen(ed->buffer[ed->cursor_y]);
     if ((size_t)ed->cursor_x > line_len) ed->cursor_x = (int)line_len;
@@ -498,13 +562,11 @@ void insert_char(Editor *ed, char c) {
     ed->buffer[ed->cursor_y] = new_line;
     ed->cursor_x++;
     ed->modified = 1;
-    if (ed->cursor_x >= ed->left_col + (getmaxx(stdscr) - 6)) {
-        ed->left_col = ed->cursor_x - (getmaxx(stdscr) - 6) + 1;
-    }
+    adjust_view(ed);
 }
 
-/* Eliminar carácter bajo cursor o anterior (Backspace) */
 void delete_char(Editor *ed) {
+    if (ed->cursor_y == ed->num_lines) return;
     if (ed->cursor_x > 0) {
         push_history(ed);
         size_t line_len = strlen(ed->buffer[ed->cursor_y]);
@@ -521,34 +583,41 @@ void delete_char(Editor *ed) {
         free(ed->buffer[ed->cursor_y - 1]);
         free(ed->buffer[ed->cursor_y]);
         ed->buffer[ed->cursor_y - 1] = new_line;
-        for (int i = ed->cursor_y; i < ed->num_lines - 1; i++) {
-            ed->buffer[i] = ed->buffer[i + 1];
-        }
+        for (int i = ed->cursor_y; i < ed->num_lines - 1; i++) ed->buffer[i] = ed->buffer[i + 1];
         ed->num_lines--;
         ed->cursor_y--;
         ed->cursor_x = (int)prev_len;
         ed->modified = 1;
     }
+    adjust_view(ed);
 }
 
-/* Insertar nueva línea (Enter) */
 void insert_newline(Editor *ed) {
+    if (ed->cursor_y == ed->num_lines) {
+        push_history(ed);
+        ed->buffer = realloc(ed->buffer, (ed->num_lines + 1) * sizeof(char *));
+        ed->buffer[ed->num_lines] = my_strdup("");
+        ed->num_lines++;
+        ed->cursor_y = ed->num_lines; /* sigue en virtual */
+        ed->cursor_x = 0;
+        ed->modified = 1;
+        return;
+    }
     push_history(ed);
     char *rest = my_strdup(ed->buffer[ed->cursor_y] + ed->cursor_x);
     ed->buffer[ed->cursor_y][ed->cursor_x] = '\0';
     ed->buffer = realloc(ed->buffer, (ed->num_lines + 1) * sizeof(char *));
-    for (int i = ed->num_lines; i > ed->cursor_y + 1; i--) {
-        ed->buffer[i] = ed->buffer[i - 1];
-    }
+    for (int i = ed->num_lines; i > ed->cursor_y + 1; i--) ed->buffer[i] = ed->buffer[i - 1];
     ed->buffer[ed->cursor_y + 1] = rest;
     ed->num_lines++;
     ed->cursor_y++;
     ed->cursor_x = 0;
     ed->modified = 1;
+    adjust_view(ed);
 }
 
-/* Eliminar línea completa actual */
 void delete_current_line(Editor *ed) {
+    if (ed->cursor_y == ed->num_lines) return;
     if (ed->num_lines <= 1) {
         push_history(ed);
         free(ed->buffer[0]);
@@ -559,17 +628,16 @@ void delete_current_line(Editor *ed) {
     }
     push_history(ed);
     free(ed->buffer[ed->cursor_y]);
-    for (int i = ed->cursor_y; i < ed->num_lines - 1; i++) {
-        ed->buffer[i] = ed->buffer[i + 1];
-    }
+    for (int i = ed->cursor_y; i < ed->num_lines - 1; i++) ed->buffer[i] = ed->buffer[i + 1];
     ed->num_lines--;
-    if (ed->cursor_y >= ed->num_lines) ed->cursor_y = ed->num_lines - 1;
+    if (ed->cursor_y >= ed->num_lines) ed->cursor_y = ed->num_lines;
     ed->cursor_x = 0;
     ed->modified = 1;
+    adjust_view(ed);
 }
 
-/* Cortar línea actual al portapapeles */
 void cut_line(Editor *ed) {
+    if (ed->cursor_y == ed->num_lines) return;
     free_clipboard(ed);
     ed->clipboard = malloc(sizeof(char *));
     ed->clipboard[0] = my_strdup(ed->buffer[ed->cursor_y]);
@@ -578,27 +646,25 @@ void cut_line(Editor *ed) {
     draw_status_bar(ed, "Línea cortada");
 }
 
-/* Pegar contenido del portapapeles en posición actual */
 void paste_clipboard(Editor *ed) {
     if (ed->clipboard_lines == 0) {
         draw_status_bar(ed, "Portapapeles vacío");
         return;
     }
     push_history(ed);
+    int insert_after = (ed->cursor_y == ed->num_lines) ? ed->num_lines - 1 : ed->cursor_y;
     int old_num_lines = ed->num_lines;
     ed->buffer = realloc(ed->buffer, (old_num_lines + ed->clipboard_lines) * sizeof(char *));
-    for (int i = old_num_lines - 1; i > ed->cursor_y; i--) {
-        ed->buffer[i + ed->clipboard_lines] = ed->buffer[i];
-    }
-    for (int i = 0; i < ed->clipboard_lines; i++) {
-        ed->buffer[ed->cursor_y + 1 + i] = my_strdup(ed->clipboard[i]);
-    }
+    for (int i = old_num_lines - 1; i > insert_after; i--) ed->buffer[i + ed->clipboard_lines] = ed->buffer[i];
+    for (int i = 0; i < ed->clipboard_lines; i++) ed->buffer[insert_after + 1 + i] = my_strdup(ed->clipboard[i]);
     ed->num_lines += ed->clipboard_lines;
+    ed->cursor_y = insert_after + ed->clipboard_lines;
+    ed->cursor_x = 0;
     ed->modified = 1;
+    adjust_view(ed);
     draw_status_bar(ed, "Pegado");
 }
 
-/* Buscar texto */
 void search(Editor *ed) {
     char pattern[256];
     if (read_line_from_user(ed, "Buscar: ", pattern, sizeof(pattern)) != OK) return;
@@ -610,20 +676,15 @@ void search(Editor *ed) {
         int line_idx = (start_y + i) % ed->num_lines;
         char *line = ed->buffer[line_idx];
         char *found = NULL;
-        if (i == 0 && start_y == ed->cursor_y) {
-            if ((size_t)start_x < strlen(line)) {
-                found = strstr(line + start_x, pattern);
-            }
+        if (i == 0 && start_y == ed->cursor_y && start_y < ed->num_lines) {
+            if ((size_t)start_x < strlen(line)) found = strstr(line + start_x, pattern);
         } else {
             found = strstr(line, pattern);
         }
         if (found) {
             ed->cursor_y = line_idx;
             ed->cursor_x = (int)(found - line);
-            if (ed->cursor_y < ed->top_line) ed->top_line = ed->cursor_y;
-            if (ed->cursor_y >= ed->top_line + (getmaxy(stdscr) - 3)) ed->top_line = ed->cursor_y - (getmaxy(stdscr) - 4);
-            if (ed->cursor_x < ed->left_col) ed->left_col = ed->cursor_x;
-            if (ed->cursor_x >= ed->left_col + (getmaxx(stdscr) - 6)) ed->left_col = ed->cursor_x - (getmaxx(stdscr) - 6) + 1;
+            adjust_view(ed);
             draw_screen(ed);
             draw_status_bar(ed, "Coincidencia encontrada (^W para siguiente)");
             return;
@@ -633,12 +694,8 @@ void search(Editor *ed) {
     draw_status_bar(ed, "No se encontró el texto");
 }
 
-/* Buscar siguiente */
 void search_next(Editor *ed) {
-    if (ed->last_search[0] == '\0') {
-        search(ed);
-        return;
-    }
+    if (ed->last_search[0] == '\0') { search(ed); return; }
     char pattern[256];
     strncpy(pattern, ed->last_search, sizeof(pattern));
     int start_y = ed->cursor_y;
@@ -648,19 +705,14 @@ void search_next(Editor *ed) {
         char *line = ed->buffer[line_idx];
         char *found = NULL;
         if (i == 0) {
-            if ((size_t)start_x < strlen(line)) {
-                found = strstr(line + start_x, pattern);
-            }
+            if ((size_t)start_x < strlen(line)) found = strstr(line + start_x, pattern);
         } else {
             found = strstr(line, pattern);
         }
         if (found) {
             ed->cursor_y = line_idx;
             ed->cursor_x = (int)(found - line);
-            if (ed->cursor_y < ed->top_line) ed->top_line = ed->cursor_y;
-            if (ed->cursor_y >= ed->top_line + (getmaxy(stdscr) - 3)) ed->top_line = ed->cursor_y - (getmaxy(stdscr) - 4);
-            if (ed->cursor_x < ed->left_col) ed->left_col = ed->cursor_x;
-            if (ed->cursor_x >= ed->left_col + (getmaxx(stdscr) - 6)) ed->left_col = ed->cursor_x - (getmaxx(stdscr) - 6) + 1;
+            adjust_view(ed);
             draw_screen(ed);
             draw_status_bar(ed, "Coincidencia encontrada");
             return;
@@ -670,67 +722,60 @@ void search_next(Editor *ed) {
     draw_status_bar(ed, "No hay más coincidencias");
 }
 
-/* Ir a línea específica */
 void goto_line(Editor *ed) {
     char input[32];
     if (read_line_from_user(ed, "Ir a línea: ", input, sizeof(input)) != OK) return;
     int line_num = atoi(input);
-    if (line_num < 1 || line_num > ed->num_lines) {
+    int total_lines = ed->num_lines + 1;
+    if (line_num < 1 || line_num > total_lines) {
         draw_status_bar(ed, "Número de línea inválido");
         return;
     }
-    ed->cursor_y = line_num - 1;
+    if (line_num == total_lines) ed->cursor_y = ed->num_lines;
+    else ed->cursor_y = line_num - 1;
     ed->cursor_x = 0;
-    if (ed->cursor_y < ed->top_line) ed->top_line = ed->cursor_y;
-    if (ed->cursor_y >= ed->top_line + (getmaxy(stdscr) - 3)) ed->top_line = ed->cursor_y - (getmaxy(stdscr) - 4);
+    adjust_view(ed);
     draw_screen(ed);
 }
 
-/* Confirmar salida */
 void confirm_exit(Editor *ed) {
     if (ed->modified) {
         draw_status_bar(ed, "¿Guardar antes de salir? (s/n/c): ");
         int ch = getch();
         if (ch == 's' || ch == 'S') {
-            char filename[256];
             if (ed->filename) {
-                if (save_file(ed, ed->filename)) {
-                    cleanup();
-                    exit(0);
-                }
+                if (save_file(ed, ed->filename)) { cleanup(); exit(0); }
             } else {
+                char filename[256];
                 if (read_line_from_user(ed, "Nombre de archivo: ", filename, sizeof(filename)) == OK) {
-                    if (save_file(ed, filename)) {
-                        cleanup();
-                        exit(0);
-                    }
+                    if (save_file(ed, filename)) { cleanup(); exit(0); }
                 }
             }
         } else if (ch == 'n' || ch == 'N') {
-            cleanup();
-            exit(0);
+            cleanup(); exit(0);
         } else {
             draw_screen(ed);
         }
     } else {
-        cleanup();
-        exit(0);
+        cleanup(); exit(0);
     }
 }
 
-/* Manejar entrada de teclado */
 void handle_input(Editor *ed, int ch) {
     switch (ch) {
         case KEY_CTRL('G'): show_help(ed); break;
-        case KEY_CTRL('O'): {
-            char filename[256];
-            if (ed->filename) {
-                save_file(ed, ed->filename);
-            } else {
-                if (read_line_from_user(ed, "Nombre de archivo: ", filename, sizeof(filename)) == OK) {
+        case KEY_CTRL_S:
+            if (ed->filename) save_file(ed, ed->filename);
+            else {
+                char filename[256];
+                if (read_line_from_user(ed, "Nombre de archivo: ", filename, sizeof(filename)) == OK)
                     save_file(ed, filename);
-                }
             }
+            break;
+        case KEY_CTRL('O'): {
+            char filename[256] = "";
+            if (read_filename_with_default(ed, "Nombre de archivo", filename, sizeof(filename), ed->filename) == OK)
+                save_file(ed, filename);
             break;
         }
         case KEY_CTRL('F'): search(ed); break;
@@ -741,56 +786,63 @@ void handle_input(Editor *ed, int ch) {
         case KEY_CTRL('Y'): redo(ed); break;
         case KEY_CTRL_SLASH: goto_line(ed); break;
         case KEY_CTRL('X'): confirm_exit(ed); break;
-        case KEY_CTRL('L'): clear(); draw_screen(ed); break;
+        case KEY_CTRL('L'):
+            clearok(stdscr, TRUE);
+            adjust_view(ed);
+            draw_screen(ed);
+            break;
         case KEY_LEFT:
-            if (ed->cursor_x > 0) {
-                ed->cursor_x--;
-            } else if (ed->cursor_y > 0) {
+            if (ed->cursor_x > 0) ed->cursor_x--;
+            else if (ed->cursor_y > 0) {
                 ed->cursor_y--;
                 ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
             }
+            adjust_view(ed);
             break;
         case KEY_RIGHT:
-            if ((size_t)ed->cursor_x < strlen(ed->buffer[ed->cursor_y])) {
-                ed->cursor_x++;
-            } else if (ed->cursor_y < ed->num_lines - 1) {
+            if (ed->cursor_y < ed->num_lines && (size_t)ed->cursor_x < strlen(ed->buffer[ed->cursor_y])) ed->cursor_x++;
+            else if (ed->cursor_y < ed->num_lines && ed->cursor_x == (int)strlen(ed->buffer[ed->cursor_y])) {
                 ed->cursor_y++;
                 ed->cursor_x = 0;
             }
+            adjust_view(ed);
             break;
         case KEY_UP:
             if (ed->cursor_y > 0) {
                 ed->cursor_y--;
-                if ((size_t)ed->cursor_x > strlen(ed->buffer[ed->cursor_y])) {
-                    ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
-                }
+                if (ed->cursor_y == ed->num_lines) ed->cursor_x = 0;
+                else if ((size_t)ed->cursor_x > strlen(ed->buffer[ed->cursor_y])) ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
             }
+            adjust_view(ed);
             break;
         case KEY_DOWN:
-            if (ed->cursor_y < ed->num_lines - 1) {
+            if (ed->cursor_y < ed->num_lines) {
                 ed->cursor_y++;
-                if ((size_t)ed->cursor_x > strlen(ed->buffer[ed->cursor_y])) {
-                    ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
-                }
+                if (ed->cursor_y == ed->num_lines) ed->cursor_x = 0;
+                else if ((size_t)ed->cursor_x > strlen(ed->buffer[ed->cursor_y])) ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
             }
+            adjust_view(ed);
             break;
-        case KEY_HOME: ed->cursor_x = 0; break;
-        case KEY_END: ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]); break;
+        case KEY_HOME: ed->cursor_x = 0; adjust_view(ed); break;
+        case KEY_END:
+            if (ed->cursor_y < ed->num_lines) ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
+            else ed->cursor_x = 0;
+            adjust_view(ed);
+        break;
         case KEY_PPAGE:
             ed->cursor_y -= (getmaxy(stdscr) - 4);
             if (ed->cursor_y < 0) ed->cursor_y = 0;
-            break;
+            if (ed->cursor_y > ed->num_lines) ed->cursor_y = ed->num_lines;
+            adjust_view(ed);
+        break;
         case KEY_NPAGE:
             ed->cursor_y += (getmaxy(stdscr) - 4);
-            if (ed->cursor_y >= ed->num_lines) ed->cursor_y = ed->num_lines - 1;
-            break;
-        case KEY_BACKSPACE:
-        case 127:
-        case 8:
-            delete_char(ed);
-            break;
+            if (ed->cursor_y > ed->num_lines) ed->cursor_y = ed->num_lines;
+            adjust_view(ed);
+        break;
+        case KEY_BACKSPACE: case 127: case 8: delete_char(ed); break;
         case KEY_DC:
-            if ((size_t)ed->cursor_x < strlen(ed->buffer[ed->cursor_y])) {
+            if (ed->cursor_y < ed->num_lines && (size_t)ed->cursor_x < strlen(ed->buffer[ed->cursor_y])) {
                 push_history(ed);
                 memmove(ed->buffer[ed->cursor_y] + ed->cursor_x, ed->buffer[ed->cursor_y] + ed->cursor_x + 1, strlen(ed->buffer[ed->cursor_y] + ed->cursor_x));
                 ed->modified = 1;
@@ -801,29 +853,17 @@ void handle_input(Editor *ed, int ch) {
                 ed->buffer[ed->cursor_y] = realloc(ed->buffer[ed->cursor_y], curr_len + next_len + 1);
                 strcat(ed->buffer[ed->cursor_y], ed->buffer[ed->cursor_y + 1]);
                 free(ed->buffer[ed->cursor_y + 1]);
-                for (int i = ed->cursor_y + 1; i < ed->num_lines - 1; i++) {
-                    ed->buffer[i] = ed->buffer[i + 1];
-                }
+                for (int i = ed->cursor_y + 1; i < ed->num_lines - 1; i++) ed->buffer[i] = ed->buffer[i + 1];
                 ed->num_lines--;
                 ed->modified = 1;
             }
+            adjust_view(ed);
             break;
-        case KEY_ENTER:
-        case '\n':
-        case '\r':
-            insert_newline(ed);
-            break;
+        case KEY_ENTER: case '\n': case '\r': insert_newline(ed); break;
         default:
-            if (isprint(ch)) {
-                insert_char(ed, ch);
-            }
+            if (isprint(ch)) insert_char(ed, ch);
             break;
     }
-    /* Ajustar scroll */
-    if (ed->cursor_y < ed->top_line) ed->top_line = ed->cursor_y;
-    if (ed->cursor_y >= ed->top_line + (getmaxy(stdscr) - 3)) ed->top_line = ed->cursor_y - (getmaxy(stdscr) - 4);
-    if (ed->cursor_x < ed->left_col) ed->left_col = ed->cursor_x;
-    if (ed->cursor_x >= ed->left_col + (getmaxx(stdscr) - 6)) ed->left_col = ed->cursor_x - (getmaxx(stdscr) - 6) + 1;
     draw_screen(ed);
 }
 
@@ -847,13 +887,13 @@ int main(int argc, char *argv[]) {
     global_ed = &ed;
     signal(SIGWINCH, handle_resize);
 
-    if (argc > 1) {
-        load_file(&ed, argv[1]);
-    } else {
+    if (argc > 1) load_file(&ed, argv[1]);
+    else {
         ed.buffer = malloc(sizeof(char *));
         ed.buffer[0] = my_strdup("");
         ed.num_lines = 1;
         ed.filename = NULL;
+        adjust_view(&ed);
     }
 
     draw_screen(&ed);
