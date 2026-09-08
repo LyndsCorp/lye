@@ -471,8 +471,14 @@ int save_file(Editor *ed, const char *filename) {
         draw_status_bar(ed, "Error al cerrar archivo");
         return 0;
     }
+    /* Corregir posible doble free: duplicar antes de liberar */
+    char *new_filename = my_strdup(filename);
+    if (!new_filename) {
+        draw_status_bar(ed, "Error de memoria al guardar");
+        return 0;
+    }
     free(ed->filename);
-    ed->filename = my_strdup(filename);
+    ed->filename = new_filename;
     ed->modified = 0;
     draw_status_bar(ed, "Archivo guardado");
     return 1;
@@ -621,7 +627,6 @@ void show_help(Editor *ed) {
     draw_screen(ed);
 }
 
-/* Lector de línea robusto sin echo y con edición manual */
 int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen) {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
@@ -629,7 +634,6 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
     buffer[0] = '\0';
     curs_set(1);
 
-    /* Dibujar prompt */
     attron(COLOR_PAIR(3));
     mvhline(rows - 2, 0, ' ', cols);
     draw_truncated_utf8(rows - 2, 1, cols - 2, prompt);
@@ -640,8 +644,7 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
 
     int ch;
     while ((ch = getch()) != '\n' && ch != KEY_ENTER && ch != '\r') {
-        if (ch == KEY_CTRL('C')) {  /* Ctrl+C cancela */
-            noecho();
+        if (ch == KEY_CTRL('C')) {
             curs_set(1);
             draw_screen(ed);
             return ERR;
@@ -649,7 +652,6 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
             if (pos > 0) {
                 pos--;
                 buffer[pos] = '\0';
-                /* Redibujar línea */
                 mvhline(rows - 2, 1 + prompt_len, ' ', cols - 1 - prompt_len);
                 mvprintw(rows - 2, 1 + prompt_len, "%s", buffer);
                 move(rows - 2, 1 + prompt_len + pos);
@@ -658,14 +660,12 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
         } else if (isprint(ch) && pos < maxlen - 1) {
             buffer[pos++] = (char)ch;
             buffer[pos] = '\0';
-            /* Redibujar línea */
             mvhline(rows - 2, 1 + prompt_len, ' ', cols - 1 - prompt_len);
             mvprintw(rows - 2, 1 + prompt_len, "%s", buffer);
             move(rows - 2, 1 + prompt_len + pos);
             refresh();
         }
     }
-    noecho();
     curs_set(1);
     draw_screen(ed);
     return OK;
@@ -920,7 +920,7 @@ void goto_line(Editor *ed) {
 void confirm_exit(Editor *ed) {
     if (ed->modified) {
         draw_status_bar(ed, "¿Guardar antes de salir? (s/n/C): ");
-        draw_screen(ed);  // <-- Refrescar para mostrar el prompt
+        draw_screen(ed);  // Refrescar para mostrar el prompt
         int ch = getch();
         if (ch == 's' || ch == 'S') {
             if (ed->filename) {
@@ -941,7 +941,6 @@ void confirm_exit(Editor *ed) {
             cleanup();
             exit(0);
         } else {
-            /* Cancelar */
             draw_screen(ed);
         }
     } else {
