@@ -73,7 +73,7 @@ static char *trim(char *str);
 static int compile_regex(regex_t *preg, const char *pattern, int cflags);
 static int parse_hex_color(const char *hex);
 static int color_name_to_index(const char *name);
-static void initialize_startend_states(Editor *ed, int line_index);
+// La función initialize_startend_states ha sido eliminada (ya no se usa)
 
 /* ------------------------------------------------------------------------- */
 /* Implementación                                                            */
