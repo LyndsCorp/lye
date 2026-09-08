@@ -66,7 +66,6 @@ void search_next(Editor *ed);
 void goto_line(Editor *ed);
 void confirm_exit(Editor *ed);
 void handle_input(Editor *ed, int ch);
-int read_key(void);
 int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen);
 int read_filename_with_default(Editor *ed, const char *prompt, char *buffer, int maxlen, const char *def);
 char **duplicate_buffer(Editor *ed, int *num_lines_out);
@@ -88,30 +87,16 @@ char *my_strdup(const char *s) {
     return p;
 }
 
-/* Valida una secuencia UTF-8 de longitud len */
 int is_valid_utf8(const unsigned char *s, size_t len) {
     if (len == 0) return 0;
     unsigned char c = s[0];
     if (c < 0x80) return len == 1;
-    if ((c & 0xE0) == 0xC0) {
-        if (len < 2) return 0;
-        if ((s[1] & 0xC0) != 0x80) return 0;
-        return len == 2;
-    }
-    if ((c & 0xF0) == 0xE0) {
-        if (len < 3) return 0;
-        if ((s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80) return 0;
-        return len == 3;
-    }
-    if ((c & 0xF8) == 0xF0) {
-        if (len < 4) return 0;
-        if ((s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80 || (s[3] & 0xC0) != 0x80) return 0;
-        return len == 4;
-    }
+    if ((c & 0xE0) == 0xC0) return len == 2 && (s[1] & 0xC0) == 0x80;
+    if ((c & 0xF0) == 0xE0) return len == 3 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80;
+    if ((c & 0xF8) == 0xF0) return len == 4 && (s[1] & 0xC0) == 0x80 && (s[2] & 0xC0) == 0x80 && (s[3] & 0xC0) == 0x80;
     return 0;
 }
 
-/* Reemplaza caracteres no imprimibles o secuencias UTF-8 inválidas por '?' */
 char *sanitize_string(const char *str) {
     if (!str) return my_strdup("");
     size_t len = strlen(str);
@@ -131,7 +116,6 @@ char *sanitize_string(const char *str) {
             i++;
             continue;
         }
-        /* Determinar longitud de secuencia UTF-8 */
         size_t seq_len;
         if ((c & 0xE0) == 0xC0) seq_len = 2;
         else if ((c & 0xF0) == 0xE0) seq_len = 3;
@@ -206,7 +190,7 @@ void init_curses(void) {
         init_pair(4, COLOR_BLACK, COLOR_WHITE);
         init_pair(5, COLOR_RED, COLOR_BLACK);
     }
-    timeout(50); /* para lectura de secuencias */
+    /* No usar timeout para no interferir con getch */
 }
 
 void cleanup(void) {
@@ -649,6 +633,8 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
     attroff(COLOR_PAIR(3));
     move(rows - 2, 1 + (int)strlen(prompt));
     refresh();
+    /* Limpiar buffer y leer */
+    buffer[0] = '\0';
     int result = getnstr(buffer, maxlen - 1);
     noecho();
     curs_set(1);
@@ -669,41 +655,6 @@ int read_filename_with_default(Editor *ed, const char *prompt, char *buffer, int
         buffer[maxlen-1] = '\0';
     }
     return result;
-}
-
-/* Lee una tecla, interceptando ESC para detectar Ctrl+Shift+Z */
-int read_key(void) {
-    int ch = getch();
-    if (ch != 27) return ch;
-    /* Leer secuencia de escape sin bloquear */
-    nodelay(stdscr, TRUE);
-    int seq[16];
-    int idx = 0;
-    int c;
-    while ((c = getch()) != ERR && idx < 15) {
-        seq[idx++] = c;
-        if (c == 'u') break; /* fin de secuencia CSI u */
-    }
-    nodelay(stdscr, FALSE);
-    if (idx > 0) {
-        /* Ver si es Ctrl+Shift+Z: ESC [ 9 0 ; 5 u o ESC [ 1 2 2 ; 5 u */
-        char params[32] = {0};
-        int p = 0;
-        for (int i = 0; i < idx - 1 && p < 31; i++) {
-            params[p++] = seq[i];
-        }
-        params[p] = '\0';
-        if (strstr(params, "90;5") || strstr(params, "90;6") ||
-            strstr(params, "122;5") || strstr(params, "122;6")) {
-            return KEY_CTRL('Y');
-            }
-            /* No es la secuencia esperada: devolver caracteres leídos */
-            for (int i = idx - 1; i >= 0; i--) {
-                ungetch(seq[i]);
-            }
-            return 27; /* ESC */
-    }
-    return 27;
 }
 
 void insert_char(Editor *ed, char c) {
@@ -943,7 +894,7 @@ void confirm_exit(Editor *ed) {
             if (ed->filename) {
                 if (save_file(ed, ed->filename)) { cleanup(); exit(0); }
             } else {
-                char filename[256];
+                char filename[256] = "";
                 if (read_line_from_user(ed, "Nombre de archivo: ", filename, sizeof(filename)) == OK) {
                     if (save_file(ed, filename)) { cleanup(); exit(0); }
                 }
@@ -964,7 +915,7 @@ void handle_input(Editor *ed, int ch) {
         case KEY_CTRL_S:
             if (ed->filename) save_file(ed, ed->filename);
             else {
-                char filename[256];
+                char filename[256] = "";
                 if (read_line_from_user(ed, "Nombre de archivo: ", filename, sizeof(filename)) == OK)
                     save_file(ed, filename);
             }
@@ -1088,16 +1039,9 @@ int main(int argc, char *argv[]) {
     if (argc > 1) load_file(&ed, argv[1]);
     else {
         ed.buffer = malloc(sizeof(char *));
-        if (!ed.buffer) {
-            cleanup();
-            return 1;
-        }
+        if (!ed.buffer) { cleanup(); return 1; }
         ed.buffer[0] = my_strdup("");
-        if (!ed.buffer[0]) {
-            free(ed.buffer);
-            cleanup();
-            return 1;
-        }
+        if (!ed.buffer[0]) { free(ed.buffer); cleanup(); return 1; }
         ed.num_lines = 1;
         ed.filename = NULL;
         adjust_view(&ed);
@@ -1106,17 +1050,11 @@ int main(int argc, char *argv[]) {
     draw_screen(&ed);
     int ch;
     while (1) {
-        ch = read_key();
+        ch = getch();
         if (resize_pending) {
             resize_pending = 0;
             clearok(stdscr, TRUE);
             adjust_view(&ed);
-        }
-        /* Si obtuvimos ESC, puede ser una tecla de función; leer de nuevo */
-        if (ch == 27) {
-            int ch2 = getch();
-            if (ch2 != ERR) ch = ch2;
-            else ch = 27; /* ESC sola */
         }
         handle_input(&ed, ch);
     }
