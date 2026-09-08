@@ -190,7 +190,6 @@ void init_curses(void) {
         init_pair(4, COLOR_BLACK, COLOR_WHITE);
         init_pair(5, COLOR_RED, COLOR_BLACK);
     }
-    /* No usar timeout para no interferir con getch */
 }
 
 void cleanup(void) {
@@ -622,30 +621,62 @@ void show_help(Editor *ed) {
     draw_screen(ed);
 }
 
+/* Lector de línea robusto sin echo y con edición manual */
 int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen) {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
-    echo();
+    int pos = 0;
+    buffer[0] = '\0';
     curs_set(1);
+
+    /* Dibujar prompt */
     attron(COLOR_PAIR(3));
     mvhline(rows - 2, 0, ' ', cols);
     draw_truncated_utf8(rows - 2, 1, cols - 2, prompt);
     attroff(COLOR_PAIR(3));
-    move(rows - 2, 1 + (int)strlen(prompt));
+    int prompt_len = (int)strlen(prompt);
+    move(rows - 2, 1 + prompt_len);
     refresh();
-    /* Limpiar buffer y leer */
-    buffer[0] = '\0';
-    int result = getnstr(buffer, maxlen - 1);
+
+    int ch;
+    while ((ch = getch()) != '\n' && ch != KEY_ENTER && ch != '\r') {
+        if (ch == KEY_CTRL('C')) {  /* Ctrl+C cancela */
+            noecho();
+            curs_set(1);
+            draw_screen(ed);
+            return ERR;
+        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+            if (pos > 0) {
+                pos--;
+                buffer[pos] = '\0';
+                /* Redibujar línea */
+                mvhline(rows - 2, 1 + prompt_len, ' ', cols - 1 - prompt_len);
+                mvprintw(rows - 2, 1 + prompt_len, "%s", buffer);
+                move(rows - 2, 1 + prompt_len + pos);
+                refresh();
+            }
+        } else if (isprint(ch) && pos < maxlen - 1) {
+            buffer[pos++] = (char)ch;
+            buffer[pos] = '\0';
+            /* Redibujar línea */
+            mvhline(rows - 2, 1 + prompt_len, ' ', cols - 1 - prompt_len);
+            mvprintw(rows - 2, 1 + prompt_len, "%s", buffer);
+            move(rows - 2, 1 + prompt_len + pos);
+            refresh();
+        }
+    }
     noecho();
     curs_set(1);
     draw_screen(ed);
-    return result;
+    return OK;
 }
 
 int read_filename_with_default(Editor *ed, const char *prompt, char *buffer, int maxlen, const char *def) {
     char full_prompt[512];
     if (def && def[0]) {
-        snprintf(full_prompt, sizeof(full_prompt), "%s [%s]: ", prompt, def);
+        char *safe_def = sanitize_string(def);
+        snprintf(full_prompt, sizeof(full_prompt), "%s [%s]: ", prompt, safe_def);
+        free(safe_def);
     } else {
         snprintf(full_prompt, sizeof(full_prompt), "%s: ", prompt);
     }
@@ -888,24 +919,34 @@ void goto_line(Editor *ed) {
 
 void confirm_exit(Editor *ed) {
     if (ed->modified) {
-        draw_status_bar(ed, "¿Guardar antes de salir? (s/n/c): ");
+        draw_status_bar(ed, "¿Guardar antes de salir? (s/n/C): ");
+        draw_screen(ed);  // <-- Refrescar para mostrar el prompt
         int ch = getch();
         if (ch == 's' || ch == 'S') {
             if (ed->filename) {
-                if (save_file(ed, ed->filename)) { cleanup(); exit(0); }
+                if (save_file(ed, ed->filename)) {
+                    cleanup();
+                    exit(0);
+                }
             } else {
                 char filename[256] = "";
                 if (read_line_from_user(ed, "Nombre de archivo: ", filename, sizeof(filename)) == OK) {
-                    if (save_file(ed, filename)) { cleanup(); exit(0); }
+                    if (save_file(ed, filename)) {
+                        cleanup();
+                        exit(0);
+                    }
                 }
             }
         } else if (ch == 'n' || ch == 'N') {
-            cleanup(); exit(0);
+            cleanup();
+            exit(0);
         } else {
+            /* Cancelar */
             draw_screen(ed);
         }
     } else {
-        cleanup(); exit(0);
+        cleanup();
+        exit(0);
     }
 }
 
@@ -1013,7 +1054,6 @@ void handle_input(Editor *ed, int ch) {
             if (isprint(ch)) insert_char(ed, ch);
             break;
     }
-    draw_screen(ed);
 }
 
 int main(int argc, char *argv[]) {
@@ -1057,6 +1097,7 @@ int main(int argc, char *argv[]) {
             adjust_view(&ed);
         }
         handle_input(&ed, ch);
+        draw_screen(&ed);
     }
 
     free_buffer(&ed);
