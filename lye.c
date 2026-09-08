@@ -1064,11 +1064,20 @@ void insert_string(Editor *ed, const char *s) {
 }
 
 void delete_char(Editor *ed) {
-    if (ed->cursor_y == ed->num_lines) return;
+    if (ed->cursor_y == ed->num_lines) {
+        // Estamos en la línea extra: mover el cursor a la línea anterior, si existe
+        if (ed->num_lines > 0) {
+            ed->cursor_y--;
+            ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
+            ed->left_col = 0;
+            adjust_view(ed);
+        }
+        return;
+    }
+
     if (ed->cursor_x > 0) {
         push_history(ed);
         int start = prev_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x);
-        int len = ed->cursor_x - start;
         memmove(ed->buffer[ed->cursor_y] + start, ed->buffer[ed->cursor_y] + ed->cursor_x,
                 strlen(ed->buffer[ed->cursor_y] + ed->cursor_x) + 1);
         ed->cursor_x = start;
