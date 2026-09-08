@@ -25,8 +25,8 @@
 #define KEY_CTRL_SLASH 0x1F
 #define KEY_CTRL_S     19
 
-#define VERSION "0.1"
-#define EDITION "lye - Lynds Editor\nPrimera versión de lye."
+#define VERSION "1.0"
+#define EDITION "lye - Lynds Editor\nPrimera versión de lye.\n¡Espero que te guste! :)"
 
 typedef struct Editor {
     char **buffer;
