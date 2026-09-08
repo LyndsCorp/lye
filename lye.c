@@ -1513,7 +1513,7 @@ int main(int argc, char *argv[]) {
         set_current_syntax(&ed, NULL);
         reset_syntax_state(&ed);
         adjust_view(&ed);
-        draw_status_bar(&ed, "Bienvenido a lye. Pulse ^G para ayuda.");
+        draw_status_bar(&ed, "Bienvenido a lye. Pulse ^G para ayuda. ^ es la tecla Ctrl");
     }
 
     draw_screen(&ed);
