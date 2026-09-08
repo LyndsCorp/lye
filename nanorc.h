@@ -73,6 +73,7 @@ static char *trim(char *str);
 static int compile_regex(regex_t *preg, const char *pattern, int cflags);
 static int parse_hex_color(const char *hex);
 static int color_name_to_index(const char *name);
+static void initialize_startend_states(Editor *ed, int line_index);
 
 /* ------------------------------------------------------------------------- */
 /* Implementación                                                            */
@@ -456,7 +457,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
 
                                                                      while (*p && isspace((unsigned char)*p)) p++;
 
-                                                                     // Detectar si es una regla start/end
                                                                      if (strncmp(p, "start=", 6) == 0) {
                                                                          p += 6;
                                                                          char *start = NULL;
@@ -486,7 +486,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                          free(start);
                                                                          free(end);
                                                                      } else {
-                                                                         // Regla simple
                                                                          if (*p == '"') {
                                                                              char *first_quote = p;
                                                                              char *last_quote = strrchr(p, '"');
@@ -566,6 +565,42 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                              }
                                                          }
 
+                                                         /* Inicializa el estado de reglas start/end para la línea line_index */
+                                                         static void initialize_startend_states(Editor *ed, int line_index) {
+                                                             SyntaxRule *rule = (SyntaxRule *)ed->syntax_rule;
+                                                             if (!rule || !ed->syntax_state) return;
+                                                             for (int i = 0; i < rule->startend_rules_count; i++) {
+                                                                 int state = 0;
+                                                                 for (int l = 0; l < line_index; l++) {
+                                                                     if (l >= ed->num_lines) break;
+                                                                     const char *line = ed->buffer[l];
+                                                                     if (!line) continue;
+                                                                     if (!state) {
+                                                                         regmatch_t match;
+                                                                         if (regexec(&rule->startend_rules[i].start_regex, line, 1, &match, 0) == 0) {
+                                                                             state = 1;
+                                                                             const char *after_start = line + match.rm_eo;
+                                                                             regmatch_t end_match;
+                                                                             if (regexec(&rule->startend_rules[i].end_regex, after_start, 1, &end_match, 0) == 0) {
+                                                                                 state = 0;
+                                                                             }
+                                                                         }
+                                                                     } else {
+                                                                         regmatch_t match;
+                                                                         if (regexec(&rule->startend_rules[i].end_regex, line, 1, &match, 0) == 0) {
+                                                                             state = 0;
+                                                                             const char *after_end = line + match.rm_eo;
+                                                                             regmatch_t start_match;
+                                                                             if (regexec(&rule->startend_rules[i].start_regex, after_end, 1, &start_match, 0) == 0) {
+                                                                                 state = 1;
+                                                                             }
+                                                                         }
+                                                                     }
+                                                                 }
+                                                                 ed->syntax_state[i] = state;
+                                                             }
+                                                         }
+
                                                          void apply_syntax_to_line(Editor *ed, int line_index,
                                                                                    int start_col, int visible_len,
                                                                                    int *segments, int *seg_count) {
@@ -573,6 +608,11 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                              SyntaxRule *rule = (SyntaxRule *)ed->syntax_rule;
                                                              if (!rule || !ed->buffer || line_index < 0 || line_index >= ed->num_lines) {
                                                                  return;
+                                                             }
+
+                                                             // Si es la primera línea visible, recalcular estados desde el inicio
+                                                             if (line_index == ed->top_line) {
+                                                                 initialize_startend_states(ed, line_index);
                                                              }
 
                                                              char *line = ed->buffer[line_index];
@@ -626,18 +666,15 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  int pos = start_col;
 
                                                                  if (!state) {
-                                                                     // Buscar inicio en toda la línea
                                                                      regmatch_t match;
                                                                      if (regexec(&ser->start_regex, line, 1, &match, 0) == 0) {
                                                                          int ms = match.rm_so;
                                                                          int me = match.rm_eo;
                                                                          if (ms < start_col) {
-                                                                             // Inicio antes de la parte visible: activar estado y pintar desde start_col
                                                                              state = 1;
                                                                              ed->syntax_state[i] = 1;
                                                                              pos = start_col;
                                                                          } else if (ms < end_col) {
-                                                                             // Inicio visible: colorear delimitador y activar estado
                                                                              if (me > end_col) me = end_col;
                                                                              int pair = get_color_pair(&ser->color);
                                                                              int attrs = ser->color.attrs;
@@ -651,48 +688,39 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                              ed->syntax_state[i] = 1;
                                                                              pos = me;
                                                                          } else {
-                                                                             // Inicio más allá del final visible: no aplica
                                                                              continue;
                                                                          }
                                                                      } else {
-                                                                         // No hay inicio en la línea
                                                                          continue;
                                                                      }
                                                                  }
 
-                                                                 // En estado 1: buscar fin desde pos
                                                                  while (pos < end_col) {
                                                                      regmatch_t end_match;
                                                                      if (regexec(&ser->end_regex, line + pos, 1, &end_match, 0) == 0 &&
                                                                          pos + end_match.rm_so >= start_col && pos + end_match.rm_so < end_col) {
-                                                                         int ms = pos + end_match.rm_so;  // inicio del delimitador de fin
-                                                                         int me = pos + end_match.rm_eo;  // fin del delimitador de fin
-                                                                         if (me > end_col) me = end_col;
-
-                                                                         int pair = get_color_pair(&ser->color);
+                                                                         int ms = pos + end_match.rm_so;
+                                                                     int me = pos + end_match.rm_eo;
+                                                                     if (me > end_col) me = end_col;
+                                                                     int pair = get_color_pair(&ser->color);
                                                                          int attrs = ser->color.attrs;
-
-                                                                     // Colorear el texto entre pos y ms (excluyendo el fin)
-                                                                     for (int j = pos; j < ms; j++) {
-                                                                         if (j >= start_col && j < end_col) {
-                                                                             color_map[j - start_col] = pair;
-                                                                             attr_map[j - start_col] = attrs;
+                                                                         for (int j = pos; j < ms; j++) {
+                                                                             if (j >= start_col && j < end_col) {
+                                                                                 color_map[j - start_col] = pair;
+                                                                                 attr_map[j - start_col] = attrs;
+                                                                             }
                                                                          }
-                                                                     }
-                                                                     // Colorear el delimitador de fin
-                                                                     for (int j = ms; j < me; j++) {
-                                                                         if (j >= start_col && j < end_col) {
-                                                                             color_map[j - start_col] = pair;
-                                                                             attr_map[j - start_col] = attrs;
+                                                                         for (int j = ms; j < me; j++) {
+                                                                             if (j >= start_col && j < end_col) {
+                                                                                 color_map[j - start_col] = pair;
+                                                                                 attr_map[j - start_col] = attrs;
+                                                                             }
                                                                          }
-                                                                     }
-
-                                                                     state = 0;
-                                                                     ed->syntax_state[i] = 0;
-                                                                     pos = me;
-                                                                     break;  // El siguiente redibujado manejará el resto si es necesario
+                                                                         state = 0;
+                                                                         ed->syntax_state[i] = 0;
+                                                                         pos = me;
+                                                                         break;
                                                                          } else {
-                                                                             // No hay fin visible: colorear todo desde pos hasta end_col
                                                                              int pair = get_color_pair(&ser->color);
                                                                              int attrs = ser->color.attrs;
                                                                              for (int j = pos; j < end_col; j++) {
@@ -707,7 +735,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  }
                                                              }
 
-                                                             // Colapsar mapas en segmentos
                                                              int current_pair = color_map[0];
                                                              int current_attrs = attr_map[0];
                                                              int current_start = start_col;
