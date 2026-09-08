@@ -3,7 +3,7 @@
  * Editor de texto TUI en C11 inspirado en GNU nano.
  * Interfaz en español, con atajos y números de línea.
  * Con resaltado de sintaxis mediante archivos .nanorc.
- */
+*/
 
 #define _GNU_SOURCE
 
@@ -1346,13 +1346,22 @@ void goto_line(Editor *ed) {
     char input[32];
     if (read_line_from_user(ed, "Ir a línea: ", input, sizeof(input)) != OK) return;
     char *endptr;
+    errno = 0;
     long line_num = strtol(input, &endptr, 10);
-    if (*endptr != '\0' || line_num < 1 || line_num > ed->num_lines + 1) {
+    // Si hay error de desbordamiento o no se leyó ningún número, tratamos como inválido
+    if (errno == ERANGE || *endptr != '\0' || endptr == input) {
         draw_status_bar(ed, "Número de línea inválido");
         return;
     }
-    if (line_num == ed->num_lines + 1) ed->cursor_y = ed->num_lines;
-    else ed->cursor_y = (int)line_num - 1;
+    // Límites: líneas van de 1 a num_lines+1 (la línea extra)
+    long total = ed->num_lines + 1;
+    if (line_num < 1) {
+        ed->cursor_y = 0;  // primera línea
+    } else if (line_num > total) {
+        ed->cursor_y = ed->num_lines;  // última línea (extra)
+    } else {
+        ed->cursor_y = (int)(line_num - 1);
+    }
     ed->cursor_x = 0;
     ed->left_col = 0;
     adjust_view(ed);
