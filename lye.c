@@ -3,7 +3,7 @@
  * Editor de texto TUI en C11 inspirado en GNU nano.
  * Interfaz en español, con atajos y números de línea.
  * Con resaltado de sintaxis mediante archivos .nanorc.
- */
+*/
 
 #define _GNU_SOURCE
 
@@ -16,6 +16,9 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
+#include <locale.h>
+#include <wchar.h>
+#include <wctype.h>
 
 /* Definiciones de teclas de control */
 #define KEY_CTRL(x) ((x) & 0x1F)
@@ -28,7 +31,7 @@
 typedef struct Editor {
     char **buffer;
     int num_lines;
-    int cursor_x, cursor_y;
+    int cursor_x, cursor_y;   // cursor_x es índice de byte dentro de la línea
     int top_line;
     int left_col;
     int modified;
@@ -68,7 +71,7 @@ void redo(Editor *ed);
 void free_buffer(Editor *ed);
 void free_clipboard(Editor *ed);
 void free_history(Editor *ed);
-void insert_char(Editor *ed, char c);
+void insert_string(Editor *ed, const char *s);
 void delete_char(Editor *ed);
 void insert_newline(Editor *ed);
 void delete_current_line(Editor *ed);
@@ -89,6 +92,9 @@ void adjust_view(Editor *ed);
 void draw_truncated_utf8(int y, int x, int max_bytes, const char *text);
 char *sanitize_string(const char *str);
 int is_valid_utf8(const unsigned char *s, size_t len);
+int prev_char_pos(const char *s, int pos);
+int next_char_pos(const char *s, int pos, int len);
+int visual_width_until(const char *line, int pos);
 
 Editor *global_ed = NULL;
 
@@ -253,13 +259,33 @@ void adjust_view(Editor *ed) {
     int block_width = edit_cols - 1;
     if (block_width <= 0) block_width = 1;
 
+    // Ajuste de left_col usando ancho visual aproximado (asumimos bytes por ahora)
     if (ed->cursor_x < ed->left_col) {
-        ed->left_col = (ed->cursor_x / block_width) * block_width;
+        ed->left_col = ed->cursor_x;
     }
-    if (ed->cursor_x >= ed->left_col + block_width) {
-        while (ed->cursor_x >= ed->left_col + block_width) {
-            ed->left_col += block_width;
+    int vis_width = visual_width_until(ed->buffer[ed->cursor_y], ed->cursor_x);
+    if (vis_width >= ed->left_col + block_width) {
+        // Necesitamos avanzar left_col para que el cursor sea visible
+        // Simplificación: avanzar de a un carácter hasta que quepa
+        int target = vis_width - block_width + 1;
+        // Convertir target a byte offset
+        int byte_off = 0;
+        const char *line = ed->buffer[ed->cursor_y];
+        int w = 0;
+        while (byte_off < ed->cursor_x) {
+            int next = next_char_pos(line, byte_off, strlen(line));
+            char tmp[8];
+            int l = next - byte_off;
+            memcpy(tmp, line + byte_off, l);
+            tmp[l] = '\0';
+            wchar_t wc;
+            mbtowc(&wc, tmp, l);
+            int cw = wcwidth(wc);
+            if (w + cw > target) break;
+            w += cw;
+            byte_off = next;
         }
+        ed->left_col = byte_off;
     }
     if (ed->left_col < 0) ed->left_col = 0;
 }
@@ -668,6 +694,31 @@ int save_file(Editor *ed, const char *filename) {
     return 1;
 }
 
+/* Funciones auxiliares para UTF-8 */
+int prev_char_pos(const char *s, int pos) {
+    if (pos <= 0) return 0;
+    pos--;
+    while (pos > 0 && ((unsigned char)s[pos] & 0xC0) == 0x80) pos--;
+    return pos;
+}
+
+int next_char_pos(const char *s, int pos, int len) {
+    if (pos >= len) return len;
+    pos++;
+    while (pos < len && ((unsigned char)s[pos] & 0xC0) == 0x80) pos++;
+    return pos;
+}
+
+int visual_width_until(const char *line, int pos) {
+    char *tmp = strndup(line, pos);
+    wchar_t *wcs = calloc(pos + 1, sizeof(wchar_t));
+    size_t n = mbstowcs(wcs, tmp, pos);
+    int width = wcswidth(wcs, n);
+    free(tmp);
+    free(wcs);
+    return width;
+}
+
 void draw_screen(Editor *ed) {
     adjust_view(ed);
     int rows, cols;
@@ -799,8 +850,9 @@ void draw_screen(Editor *ed) {
         cursor_screen_x = line_num_width + 1;
     } else {
         int has_left_marker = (ed->left_col > 0);
-        cursor_screen_x = ed->cursor_x - ed->left_col + line_num_width + 1;
-        if (has_left_marker) cursor_screen_x += 1;
+        int visual_pos = visual_width_until(ed->buffer[ed->cursor_y], ed->cursor_x) -
+        visual_width_until(ed->buffer[ed->cursor_y], ed->left_col);
+        cursor_screen_x = line_num_width + 1 + (has_left_marker ? 1 : 0) + visual_pos;
     }
     if (cursor_screen_y >= 1 && cursor_screen_y <= edit_rows) {
         move(cursor_screen_y, cursor_screen_x);
@@ -878,7 +930,7 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
     refresh();
 
     timeout(100);
-    int ch;
+
     while (1) {
         if (check_resize_ncurses(ed)) {
             getmaxyx(stdscr, rows, cols);
@@ -892,31 +944,69 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
             refresh();
             continue;
         }
-        ch = getch();
-        if (ch == ERR) continue;
-        if (ch == KEY_RESIZE) { continue; }
 
-        if (ch == '\n' || ch == KEY_ENTER || ch == '\r') break;
-        if (ch == KEY_CTRL('C')) {
-            curs_set(1);
-            draw_screen(ed);
-            return ERR;
-        } else if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
-            if (pos > 0) {
-                pos--;
-                buffer[pos] = '\0';
-                mvhline(rows - 2, 1 + prompt_len, ' ', cols - 1 - prompt_len);
-                mvprintw(rows - 2, 1 + prompt_len, "%s", buffer);
-                move(rows - 2, 1 + prompt_len + pos);
-                refresh();
+        wint_t wc;
+        int res = get_wch(&wc);
+        if (res == ERR) continue;
+
+        if (res == KEY_CODE_YES) {
+            int ch = (int)wc;
+            if (ch == '\n' || ch == KEY_ENTER || ch == '\r') break;
+            if (ch == KEY_CTRL('C')) {
+                curs_set(1);
+                draw_screen(ed);
+                return ERR;
             }
-        } else if (isprint(ch) && pos < maxlen - 1) {
-            buffer[pos++] = (char)ch;
-            buffer[pos] = '\0';
-            mvhline(rows - 2, 1 + prompt_len, ' ', cols - 1 - prompt_len);
-            mvprintw(rows - 2, 1 + prompt_len, "%s", buffer);
-            move(rows - 2, 1 + prompt_len + pos);
-            refresh();
+            if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+                if (pos > 0) {
+                    int new_pos = prev_char_pos(buffer, pos);
+                    buffer[new_pos] = '\0';
+                    pos = new_pos;
+                    mvhline(rows - 2, 1 + prompt_len, ' ', cols - 1 - prompt_len);
+                    mvprintw(rows - 2, 1 + prompt_len, "%s", buffer);
+                    move(rows - 2, 1 + prompt_len + pos);
+                    refresh();
+                }
+                continue;
+            }
+            continue;
+        } else {
+            // Carácter Unicode o control
+            if (wc < 32) {
+                int ch = (int)wc;
+                if (ch == '\n' || ch == KEY_ENTER || ch == '\r') break;
+                if (ch == KEY_CTRL('C')) {
+                    curs_set(1);
+                    draw_screen(ed);
+                    return ERR;
+                }
+                if (ch == KEY_BACKSPACE || ch == 127 || ch == 8) {
+                    if (pos > 0) {
+                        int new_pos = prev_char_pos(buffer, pos);
+                        buffer[new_pos] = '\0';
+                        pos = new_pos;
+                        mvhline(rows - 2, 1 + prompt_len, ' ', cols - 1 - prompt_len);
+                        mvprintw(rows - 2, 1 + prompt_len, "%s", buffer);
+                        move(rows - 2, 1 + prompt_len + pos);
+                        refresh();
+                    }
+                    continue;
+                }
+                continue; // ignorar otros controles
+            }
+            char mb[MB_CUR_MAX + 1];
+            int len = wctomb(mb, (wchar_t)wc);
+            if (len > 0) {
+                if (pos + len < maxlen) {
+                    memcpy(buffer + pos, mb, len);
+                    pos += len;
+                    buffer[pos] = '\0';
+                    mvhline(rows - 2, 1 + prompt_len, ' ', cols - 1 - prompt_len);
+                    mvprintw(rows - 2, 1 + prompt_len, "%s", buffer);
+                    move(rows - 2, 1 + prompt_len + pos);
+                    refresh();
+                }
+            }
         }
     }
     curs_set(1);
@@ -941,8 +1031,10 @@ int read_filename_with_default(Editor *ed, const char *prompt, char *buffer, int
     return result;
 }
 
-void insert_char(Editor *ed, char c) {
+void insert_string(Editor *ed, const char *s) {
+    if (!s || !*s) return;
     push_history(ed);
+    size_t len = strlen(s);
     if (ed->cursor_y == ed->num_lines) {
         char **new_buffer = realloc(ed->buffer, (ed->num_lines + 1) * sizeof(char *));
         if (!new_buffer) return;
@@ -956,16 +1048,16 @@ void insert_char(Editor *ed, char c) {
         ed->left_col = 0;
     }
     size_t line_len = strlen(ed->buffer[ed->cursor_y]);
-    if ((size_t)ed->cursor_x > line_len) ed->cursor_x = (int)line_len;
-    char *new_line = malloc(line_len + 2);
+    if ((size_t)ed->cursor_x > line_len) ed->cursor_x = line_len;
+    char *new_line = malloc(line_len + len + 1);
     if (!new_line) return;
     memcpy(new_line, ed->buffer[ed->cursor_y], ed->cursor_x);
-    new_line[ed->cursor_x] = c;
-    memcpy(new_line + ed->cursor_x + 1, ed->buffer[ed->cursor_y] + ed->cursor_x,
+    memcpy(new_line + ed->cursor_x, s, len);
+    memcpy(new_line + ed->cursor_x + len, ed->buffer[ed->cursor_y] + ed->cursor_x,
            line_len - ed->cursor_x + 1);
     free(ed->buffer[ed->cursor_y]);
     ed->buffer[ed->cursor_y] = new_line;
-    ed->cursor_x++;
+    ed->cursor_x += len;
     ed->modified = 1;
     ed->welcome_shown = 1;
     adjust_view(ed);
@@ -975,9 +1067,11 @@ void delete_char(Editor *ed) {
     if (ed->cursor_y == ed->num_lines) return;
     if (ed->cursor_x > 0) {
         push_history(ed);
-        size_t line_len = strlen(ed->buffer[ed->cursor_y]);
-        memmove(ed->buffer[ed->cursor_y] + ed->cursor_x - 1, ed->buffer[ed->cursor_y] + ed->cursor_x, line_len - ed->cursor_x + 1);
-        ed->cursor_x--;
+        int start = prev_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x);
+        int len = ed->cursor_x - start;
+        memmove(ed->buffer[ed->cursor_y] + start, ed->buffer[ed->cursor_y] + ed->cursor_x,
+                strlen(ed->buffer[ed->cursor_y] + ed->cursor_x) + 1);
+        ed->cursor_x = start;
         ed->modified = 1;
         ed->welcome_shown = 1;
     } else if (ed->cursor_y > 0) {
@@ -1263,7 +1357,7 @@ void handle_input(Editor *ed, int ch) {
             draw_screen(ed);
             break;
         case KEY_LEFT:
-            if (ed->cursor_x > 0) ed->cursor_x--;
+            if (ed->cursor_x > 0) ed->cursor_x = prev_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x);
             else if (ed->cursor_y > 0) {
                 ed->cursor_y--;
                 ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
@@ -1272,14 +1366,15 @@ void handle_input(Editor *ed, int ch) {
             adjust_view(ed);
             break;
         case KEY_RIGHT:
-            if (ed->cursor_y < ed->num_lines && (size_t)ed->cursor_x < strlen(ed->buffer[ed->cursor_y])) ed->cursor_x++;
-            else if (ed->cursor_y < ed->num_lines && ed->cursor_x == (int)strlen(ed->buffer[ed->cursor_y])) {
-                ed->cursor_y++;
-                ed->cursor_x = 0;
-                ed->left_col = 0;
-            }
-            adjust_view(ed);
-            break;
+            if (ed->cursor_y < ed->num_lines && ed->cursor_x < (int)strlen(ed->buffer[ed->cursor_y]))
+                ed->cursor_x = next_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x, strlen(ed->buffer[ed->cursor_y]));
+        else if (ed->cursor_y < ed->num_lines && ed->cursor_x == (int)strlen(ed->buffer[ed->cursor_y])) {
+            ed->cursor_y++;
+            ed->cursor_x = 0;
+            ed->left_col = 0;
+        }
+        adjust_view(ed);
+        break;
         case KEY_UP:
             if (ed->cursor_y > 0) {
                 ed->cursor_y--;
@@ -1320,9 +1415,11 @@ void handle_input(Editor *ed, int ch) {
         break;
         case KEY_BACKSPACE: case 127: case 8: delete_char(ed); break;
         case KEY_DC:
-            if (ed->cursor_y < ed->num_lines && (size_t)ed->cursor_x < strlen(ed->buffer[ed->cursor_y])) {
+            if (ed->cursor_y < ed->num_lines && ed->cursor_x < (int)strlen(ed->buffer[ed->cursor_y])) {
                 push_history(ed);
-                memmove(ed->buffer[ed->cursor_y] + ed->cursor_x, ed->buffer[ed->cursor_y] + ed->cursor_x + 1, strlen(ed->buffer[ed->cursor_y] + ed->cursor_x));
+                int next = next_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x, strlen(ed->buffer[ed->cursor_y]));
+                memmove(ed->buffer[ed->cursor_y] + ed->cursor_x, ed->buffer[ed->cursor_y] + next,
+                        strlen(ed->buffer[ed->cursor_y] + next) + 1);
                 ed->modified = 1;
                 ed->welcome_shown = 1;
             } else if (ed->cursor_y < ed->num_lines - 1) {
@@ -1344,12 +1441,14 @@ void handle_input(Editor *ed, int ch) {
             break;
         case KEY_ENTER: case '\n': case '\r': insert_newline(ed); break;
         default:
-            if (isprint(ch)) insert_char(ed, ch);
+            // No debería llegar aquí porque los caracteres se manejan en el bucle principal
             break;
     }
 }
 
 int main(int argc, char *argv[]) {
+    setlocale(LC_ALL, "");
+
     int filename_index = -1;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
@@ -1412,13 +1511,30 @@ int main(int argc, char *argv[]) {
 
     timeout(100);
 
-    int ch;
     while (1) {
         if (check_resize_ncurses(&ed)) continue;
-        ch = getch();
-        if (ch == ERR) continue;
-        if (ch == KEY_RESIZE) { continue; }
-        handle_input(&ed, ch);
+
+        wint_t wc;
+        int res = get_wch(&wc);
+        if (res == ERR) continue;
+
+        if (res == KEY_CODE_YES) {
+            int ch = (int)wc;
+            handle_input(&ed, ch);
+        } else {
+            // Carácter Unicode o control
+            if (wc < 32) {
+                int ch = (int)wc;
+                handle_input(&ed, ch);
+            } else {
+                char mb[MB_CUR_MAX + 1];
+                int len = wctomb(mb, (wchar_t)wc);
+                if (len > 0) {
+                    mb[len] = '\0';
+                    insert_string(&ed, mb);
+                }
+            }
+        }
         draw_screen(&ed);
     }
 
