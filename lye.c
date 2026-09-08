@@ -2,7 +2,10 @@
  * lye - Lynds Editor
  * Editor de texto TUI en C11 inspirado en GNU nano.
  * Interfaz en español, con atajos y números de línea.
+ * Con resaltado de sintaxis mediante archivos .nanorc.
  */
+
+#define _GNU_SOURCE
 
 #include <ncurses.h>
 #include <stdlib.h>
@@ -16,16 +19,13 @@
 
 /* Definiciones de teclas de control */
 #define KEY_CTRL(x) ((x) & 0x1F)
-#define KEY_CTRL_SLASH 0x1F   /* Ctrl+/ (0x1F) */
-#define KEY_CTRL_S     19     /* Ctrl+S */
+#define KEY_CTRL_SLASH 0x1F
+#define KEY_CTRL_S     19
 
-/* Versión y edición */
 #define VERSION "0.1"
-#define EDITION "lye - Lynds Editor\n" \
-"Primera versión de lye."
+#define EDITION "lye - Lynds Editor\nPrimera versión de lye."
 
-/* Estructura principal del editor */
-typedef struct {
+typedef struct Editor {
     char **buffer;
     int num_lines;
     int cursor_x, cursor_y;
@@ -46,7 +46,11 @@ typedef struct {
     int readonly;
     int welcome_shown;
     mode_t original_mode;
+    void *syntax_rule;
+    int *syntax_state;
 } Editor;
+
+#include "nanorc.h"
 
 /* Prototipos */
 void init_curses(void);
@@ -88,7 +92,6 @@ int is_valid_utf8(const unsigned char *s, size_t len);
 
 Editor *global_ed = NULL;
 
-/* Líneas de ayuda globales (usadas por --help y Ctrl+G) */
 static const char *g_help_lines[] = {
     "Atajos de teclado principales:",
     "",
@@ -279,6 +282,11 @@ void free_buffer(Editor *ed) {
         ed->buffer = NULL;
     }
     ed->num_lines = 0;
+    if (ed->syntax_state) {
+        free(ed->syntax_state);
+        ed->syntax_state = NULL;
+        ed->syntax_rule = NULL;
+    }
 }
 
 void free_clipboard(Editor *ed) {
@@ -456,6 +464,8 @@ void load_file(Editor *ed, const char *filename) {
             ed->readonly = 0;
             ed->original_mode = 0644;
             ed->welcome_shown = 0;
+            set_current_syntax(ed, ed->filename);
+            reset_syntax_state(ed);
             draw_status_bar(ed, msg);
             adjust_view(ed);
             return;
@@ -486,6 +496,8 @@ void load_file(Editor *ed, const char *filename) {
             ed->readonly = 0;
             ed->original_mode = 0644;
             ed->welcome_shown = 0;
+            set_current_syntax(ed, ed->filename);
+            reset_syntax_state(ed);
             draw_status_bar(ed, error_msg);
             adjust_view(ed);
             return;
@@ -520,6 +532,8 @@ void load_file(Editor *ed, const char *filename) {
         ed->readonly = !(st.st_mode & S_IWUSR);
         ed->original_mode = st.st_mode & 07777;
         ed->welcome_shown = 0;
+        set_current_syntax(ed, ed->filename);
+        reset_syntax_state(ed);
         draw_status_bar(ed, error_msg);
         adjust_view(ed);
         return;
@@ -580,6 +594,9 @@ void load_file(Editor *ed, const char *filename) {
     ed->readonly = !(st.st_mode & S_IWUSR);
     ed->original_mode = st.st_mode & 07777;
     ed->welcome_shown = 0;
+
+    set_current_syntax(ed, ed->filename);
+    reset_syntax_state(ed);
 
     adjust_view(ed);
 
@@ -642,6 +659,8 @@ int save_file(Editor *ed, const char *filename) {
     if (new_filename) {
         free(ed->filename);
         ed->filename = new_filename;
+        set_current_syntax(ed, ed->filename);
+        reset_syntax_state(ed);
     }
     ed->modified = 0;
     ed->readonly = 0;
@@ -681,6 +700,9 @@ void draw_screen(Editor *ed) {
     int edit_rows = rows - 3;
     int edit_cols = cols - line_num_width - 1;
 
+    int segments[MAX_SEGMENTS * 4];
+    int seg_count = 0;
+
     for (int i = 0; i < edit_rows; i++) {
         int line_index = ed->top_line + i;
         if (line_index >= total_lines) break;
@@ -710,7 +732,26 @@ void draw_screen(Editor *ed) {
             }
 
             if (visible_len > 0) {
-                mvaddnstr(i + 1, text_x, line + ed->left_col, visible_len);
+                apply_syntax_to_line(ed, line_index, ed->left_col, visible_len,
+                                     segments, &seg_count);
+                int cur_x = text_x;
+                for (int s = 0; s < seg_count; s += 4) {
+                    int seg_start = segments[s];
+                    int seg_end = segments[s + 1];
+                    int pair = segments[s + 2];
+                    int attrs = segments[s + 3];
+                    if (seg_end > seg_start) {
+                        if (pair && has_colors()) attron(COLOR_PAIR(pair));
+                        if (attrs) attron(attrs);
+                        mvaddnstr(i + 1, cur_x, line + seg_start, seg_end - seg_start);
+                        if (attrs) attroff(attrs);
+                        if (pair && has_colors()) attroff(COLOR_PAIR(pair));
+                        cur_x += seg_end - seg_start;
+                    }
+                }
+                if (seg_count == 0) {
+                    mvaddnstr(i + 1, text_x, line + ed->left_col, visible_len);
+                }
             }
 
             if (has_right_marker) {
@@ -794,7 +835,6 @@ void show_help(Editor *ed) {
     int ch;
     while (1) {
         if (check_resize_ncurses(ed)) {
-            // Redibujar ayuda
             getmaxyx(stdscr, rows, cols);
             clearok(stdscr, TRUE);
             clear();
@@ -1310,7 +1350,6 @@ void handle_input(Editor *ed, int ch) {
 }
 
 int main(int argc, char *argv[]) {
-    // Procesar opciones de línea de comandos
     int filename_index = -1;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0) {
@@ -1323,7 +1362,7 @@ int main(int argc, char *argv[]) {
             print_help_text();
             return 0;
         } else if (argv[i][0] != '-') {
-            filename_index = i;  // primer argumento que no es opción
+            filename_index = i;
         }
     }
 
@@ -1344,9 +1383,13 @@ int main(int argc, char *argv[]) {
     ed.readonly = 0;
     ed.welcome_shown = 0;
     ed.original_mode = 0644;
+    ed.syntax_rule = NULL;
+    ed.syntax_state = NULL;
 
     init_curses();
     global_ed = &ed;
+
+    init_syntax_highlighting();
 
     if (filename_index != -1) {
         load_file(&ed, argv[filename_index]);
@@ -1359,6 +1402,8 @@ int main(int argc, char *argv[]) {
         ed.filename = NULL;
         ed.readonly = 0;
         ed.welcome_shown = 0;
+        set_current_syntax(&ed, NULL);
+        reset_syntax_state(&ed);
         adjust_view(&ed);
         draw_status_bar(&ed, "Bienvenido a lye. Pulse ^G para ayuda.");
     }
@@ -1380,6 +1425,7 @@ int main(int argc, char *argv[]) {
     free_buffer(&ed);
     free_clipboard(&ed);
     free_history(&ed);
+    free_syntax_rules();
     cleanup();
     return 0;
 }
