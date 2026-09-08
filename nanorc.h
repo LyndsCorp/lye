@@ -161,6 +161,7 @@ static void parse_color_spec(const char *spec, ColorSpec *cs) {
         int bright = 0;
         if (strncmp(fg, "bright", 6) == 0 || strncmp(fg, "light", 5) == 0) {
             bright = 1;
+            cs->attrs |= A_BOLD;   // <-- Añadir negrita para bright/light
             fg += (strncmp(fg, "bright", 6) == 0) ? 6 : 5;
         } else if (strncmp(fg, "bold", 4) == 0) {
             cs->attrs |= A_BOLD;
@@ -363,6 +364,7 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                rule->startend_rules_count++;
                                                          }
 
+                                                         /* PARSER CORREGIDO */
                                                          static void parse_nanorc_file(const char *path) {
                                                              FILE *fp = fopen(path, "r");
                                                              if (!fp) return;
@@ -450,12 +452,12 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                      while (*p && isspace((unsigned char)*p)) p++;
                                                                      if (*p == '\0') continue;
 
-                                                                     char *colorspec_end = strchr(p, '"');
-                                                                     if (!colorspec_end) continue;
-                                                                     char *colorspec = strndup(p, colorspec_end - p);
-                                                                     colorspec = trim(colorspec);
+                                                                     // Extraer colorspec: primer token separado por espacios
+                                                                     char *spec_start = p;
+                                                                     while (*p && !isspace((unsigned char)*p)) p++;
+                                                                     char *colorspec = strndup(spec_start, p - spec_start);
 
-                                                                     p = colorspec_end;
+                                                                     while (*p && isspace((unsigned char)*p)) p++;
 
                                                                      if (strncmp(p, "start=", 6) == 0) {
                                                                          p += 6;
@@ -486,12 +488,15 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                          free(start);
                                                                          free(end);
                                                                      } else {
-                                                                         char *first_quote = p;
-                                                                         char *last_quote = strrchr(p, '"');
-                                                                         if (last_quote && last_quote > first_quote) {
-                                                                             char *regex = strndup(first_quote + 1, last_quote - first_quote - 1);
-                                                                             add_color_rule(current_rule, colorspec, regex, icase);
-                                                                             free(regex);
+                                                                         // Regex simple: extraer hasta la última comilla de la línea
+                                                                         if (*p == '"') {
+                                                                             char *first_quote = p;
+                                                                             char *last_quote = strrchr(p, '"');
+                                                                             if (last_quote && last_quote > first_quote) {
+                                                                                 char *regex = strndup(first_quote + 1, last_quote - first_quote - 1);
+                                                                                 add_color_rule(current_rule, colorspec, regex, icase);
+                                                                                 free(regex);
+                                                                             }
                                                                          }
                                                                      }
                                                                      free(colorspec);
