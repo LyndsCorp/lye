@@ -19,6 +19,11 @@
 #define KEY_CTRL_SLASH 0x1F   /* Ctrl+/ (0x1F) */
 #define KEY_CTRL_S     19     /* Ctrl+S */
 
+/* Versión y edición */
+#define VERSION "0.1"
+#define EDITION "lye - Lynds Editor\n" \
+"Primera versión de lye."
+
 /* Estructura principal del editor */
 typedef struct {
     char **buffer;
@@ -50,6 +55,7 @@ int check_resize_ncurses(Editor *ed);
 void draw_screen(Editor *ed);
 void draw_status_bar(Editor *ed, const char *msg);
 void show_help(Editor *ed);
+void print_help_text(void);
 void load_file(Editor *ed, const char *filename);
 int save_file(Editor *ed, const char *filename);
 void push_history(Editor *ed);
@@ -81,6 +87,32 @@ char *sanitize_string(const char *str);
 int is_valid_utf8(const unsigned char *s, size_t len);
 
 Editor *global_ed = NULL;
+
+/* Líneas de ayuda globales (usadas por --help y Ctrl+G) */
+static const char *g_help_lines[] = {
+    "Atajos de teclado principales:",
+    "",
+    "^G   Mostrar esta ayuda",
+    "^S   Guardar archivo",
+    "^O   Guardar como (pregunta nombre)",
+    "^F   Buscar texto",
+    "^W   Buscar siguiente (después de ^F)",
+    "^K   Cortar línea actual",
+    "^U   Pegar línea(s) del portapapeles",
+    "^Z   Deshacer último cambio",
+    "^Y   Rehacer cambio deshecho",
+    "^/   Ir a línea específica",
+    "^X   Salir del editor",
+    "^L   Refrescar pantalla",
+    "",
+    "Movimiento: flechas, Inicio, Fin, RePág, AvPág",
+    "Edición: Insertar, Supr, Retroceso, Enter",
+    "",
+    "Hay una línea vacía siempre disponible al final.",
+    "",
+    "Presione cualquier tecla para volver..."
+};
+static const int g_help_lines_count = sizeof(g_help_lines) / sizeof(g_help_lines[0]);
 
 char *my_strdup(const char *s) {
     size_t len = strlen(s) + 1;
@@ -753,32 +785,8 @@ void show_help(Editor *ed) {
     draw_truncated_utf8(0, 2, cols - 4, " Ayuda de lye - Lynds Editor ");
     attroff(A_REVERSE);
 
-    const char *help_lines[] = {
-        "Atajos de teclado principales:",
-        "",
-        "^G   Mostrar esta ayuda",
-        "^S   Guardar archivo",
-        "^O   Guardar como (pregunta nombre)",
-        "^F   Buscar texto",
-        "^W   Buscar siguiente (después de ^F)",
-        "^K   Cortar línea actual",
-        "^U   Pegar línea(s) del portapapeles",
-        "^Z   Deshacer último cambio",
-        "^Y   Rehacer cambio deshecho",
-        "^/   Ir a línea específica",
-        "^X   Salir del editor",
-        "^L   Refrescar pantalla",
-        "",
-        "Movimiento: flechas, Inicio, Fin, RePág, AvPág",
-        "Edición: Insertar, Supr, Retroceso, Enter",
-        "",
-        "Hay una línea vacía siempre disponible al final.",
-        "",
-        "Presione cualquier tecla para volver..."
-    };
-    int n = sizeof(help_lines) / sizeof(help_lines[0]);
-    for (int i = 0; i < n && i < rows - 2; i++) {
-        draw_truncated_utf8(i + 2, 2, cols - 4, help_lines[i]);
+    for (int i = 0; i < g_help_lines_count && i < rows - 2; i++) {
+        draw_truncated_utf8(i + 2, 2, cols - 4, g_help_lines[i]);
     }
     refresh();
 
@@ -794,8 +802,8 @@ void show_help(Editor *ed) {
             mvhline(0, 0, ' ', cols);
             draw_truncated_utf8(0, 2, cols - 4, " Ayuda de lye - Lynds Editor ");
             attroff(A_REVERSE);
-            for (int i = 0; i < n && i < rows - 2; i++) {
-                draw_truncated_utf8(i + 2, 2, cols - 4, help_lines[i]);
+            for (int i = 0; i < g_help_lines_count && i < rows - 2; i++) {
+                draw_truncated_utf8(i + 2, 2, cols - 4, g_help_lines[i]);
             }
             refresh();
             continue;
@@ -806,6 +814,12 @@ void show_help(Editor *ed) {
         break;
     }
     draw_screen(ed);
+}
+
+void print_help_text(void) {
+    for (int i = 0; i < g_help_lines_count; i++) {
+        printf("%s\n", g_help_lines[i]);
+    }
 }
 
 int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen) {
@@ -827,7 +841,6 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
     int ch;
     while (1) {
         if (check_resize_ncurses(ed)) {
-            // Redibujar prompt
             getmaxyx(stdscr, rows, cols);
             attron(COLOR_PAIR(3));
             mvhline(rows - 2, 0, ' ', cols);
@@ -1297,6 +1310,23 @@ void handle_input(Editor *ed, int ch) {
 }
 
 int main(int argc, char *argv[]) {
+    // Procesar opciones de línea de comandos
+    int filename_index = -1;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--version") == 0) {
+            printf("%s\n", VERSION);
+            return 0;
+        } else if (strcmp(argv[i], "--edition") == 0) {
+            printf("%s\n", EDITION);
+            return 0;
+        } else if (strcmp(argv[i], "--help") == 0) {
+            print_help_text();
+            return 0;
+        } else if (argv[i][0] != '-') {
+            filename_index = i;  // primer argumento que no es opción
+        }
+    }
+
     Editor ed;
     memset(&ed, 0, sizeof(Editor));
     ed.max_history = 1000;
@@ -1318,8 +1348,8 @@ int main(int argc, char *argv[]) {
     init_curses();
     global_ed = &ed;
 
-    if (argc > 1) {
-        load_file(&ed, argv[1]);
+    if (filename_index != -1) {
+        load_file(&ed, argv[filename_index]);
     } else {
         ed.buffer = malloc(sizeof(char *));
         if (!ed.buffer) { cleanup(); return 1; }
