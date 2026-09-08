@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
@@ -38,6 +39,9 @@ typedef struct {
     int history_index;
     int max_history;
     char last_search[256];
+    int readonly;            /* Indica si el archivo original no tiene permisos de escritura */
+    int welcome_shown;       /* Controla si se ha mostrado el mensaje de bienvenida */
+    mode_t original_mode;    /* Permisos originales del archivo (para restaurar después de guardar) */
 } Editor;
 
 /* Prototipos */
@@ -376,16 +380,23 @@ void redo(Editor *ed) {
 }
 
 void load_file(Editor *ed, const char *filename) {
-    FILE *fp = fopen(filename, "r");
-    if (!fp) {
+    struct stat st;
+    if (stat(filename, &st) != 0) {
         if (errno == ENOENT) {
+            /* Archivo no existe: crear buffer vacío y avisar */
+            char msg[512];
+            snprintf(msg, sizeof(msg), "El archivo «%s» no existe. Se creará al guardar.", filename);
             free_buffer(ed);
             ed->buffer = malloc(sizeof(char *));
-            if (!ed->buffer) return;
+            if (!ed->buffer) {
+                draw_status_bar(ed, "Error de memoria");
+                return;
+            }
             ed->buffer[0] = my_strdup("");
             if (!ed->buffer[0]) {
                 free(ed->buffer);
                 ed->buffer = NULL;
+                draw_status_bar(ed, "Error de memoria");
                 return;
             }
             ed->num_lines = 1;
@@ -396,13 +407,79 @@ void load_file(Editor *ed, const char *filename) {
             ed->cursor_y = 0;
             ed->top_line = 0;
             ed->left_col = 0;
+            ed->readonly = 0;
+            ed->original_mode = 0644;
+            ed->welcome_shown = 0;
+            draw_status_bar(ed, msg);
             adjust_view(ed);
             return;
         } else {
-            draw_status_bar(ed, "Error al abrir archivo");
+            char error_msg[512];
+            snprintf(error_msg, sizeof(error_msg), "Error leyendo «%s»: %s", filename, strerror(errno));
+            free_buffer(ed);
+            ed->buffer = malloc(sizeof(char *));
+            if (!ed->buffer) {
+                draw_status_bar(ed, "Error de memoria");
+                return;
+            }
+            ed->buffer[0] = my_strdup("");
+            if (!ed->buffer[0]) {
+                free(ed->buffer);
+                ed->buffer = NULL;
+                draw_status_bar(ed, "Error de memoria");
+                return;
+            }
+            ed->num_lines = 1;
+            free(ed->filename);
+            ed->filename = my_strdup(filename);
+            ed->modified = 0;
+            ed->cursor_x = 0;
+            ed->cursor_y = 0;
+            ed->top_line = 0;
+            ed->left_col = 0;
+            ed->readonly = 0;
+            ed->original_mode = 0644;
+            ed->welcome_shown = 0;
+            draw_status_bar(ed, error_msg);
+            adjust_view(ed);
             return;
         }
     }
+
+    /* El archivo existe: abrir para lectura */
+    FILE *fp = fopen(filename, "r");
+    if (!fp) {
+        char error_msg[512];
+        snprintf(error_msg, sizeof(error_msg), "Error leyendo «%s»: %s", filename, strerror(errno));
+        free_buffer(ed);
+        ed->buffer = malloc(sizeof(char *));
+        if (!ed->buffer) {
+            draw_status_bar(ed, "Error de memoria");
+            return;
+        }
+        ed->buffer[0] = my_strdup("");
+        if (!ed->buffer[0]) {
+            free(ed->buffer);
+            ed->buffer = NULL;
+            draw_status_bar(ed, "Error de memoria");
+            return;
+        }
+        ed->num_lines = 1;
+        free(ed->filename);
+        ed->filename = my_strdup(filename);
+        ed->modified = 0;
+        ed->cursor_x = 0;
+        ed->cursor_y = 0;
+        ed->top_line = 0;
+        ed->left_col = 0;
+        ed->readonly = !(st.st_mode & S_IWUSR);
+        ed->original_mode = st.st_mode & 07777;
+        ed->welcome_shown = 0;
+        draw_status_bar(ed, error_msg);
+        adjust_view(ed);
+        return;
+    }
+
     free_buffer(ed);
     ed->buffer = NULL;
     ed->num_lines = 0;
@@ -413,6 +490,7 @@ void load_file(Editor *ed, const char *filename) {
         if (!new_buffer) {
             free(line);
             fclose(fp);
+            draw_status_bar(ed, "Error de memoria");
             return;
         }
         ed->buffer = new_buffer;
@@ -420,6 +498,7 @@ void load_file(Editor *ed, const char *filename) {
         if (!dup) {
             free(line);
             fclose(fp);
+            draw_status_bar(ed, "Error de memoria");
             return;
         }
         ed->buffer[ed->num_lines] = dup;
@@ -429,17 +508,23 @@ void load_file(Editor *ed, const char *filename) {
     }
     free(line);
     fclose(fp);
+
     if (ed->num_lines == 0) {
         ed->buffer = malloc(sizeof(char *));
-        if (!ed->buffer) return;
+        if (!ed->buffer) {
+            draw_status_bar(ed, "Error de memoria");
+            return;
+        }
         ed->buffer[0] = my_strdup("");
         if (!ed->buffer[0]) {
             free(ed->buffer);
             ed->buffer = NULL;
+            draw_status_bar(ed, "Error de memoria");
             return;
         }
         ed->num_lines = 1;
     }
+
     free(ed->filename);
     ed->filename = my_strdup(filename);
     ed->modified = 0;
@@ -447,18 +532,46 @@ void load_file(Editor *ed, const char *filename) {
     ed->cursor_y = 0;
     ed->top_line = 0;
     ed->left_col = 0;
+    ed->readonly = !(st.st_mode & S_IWUSR);
+    ed->original_mode = st.st_mode & 07777;
+    ed->welcome_shown = 0;
+
     adjust_view(ed);
+
+    if (ed->readonly) {
+        draw_status_bar(ed, "Archivo de solo lectura. Use ^O para guardar con otro nombre.");
+    } else {
+        draw_status_bar(ed, "Bienvenido a lye. Pulse ^G para ayuda.");
+    }
 }
 
 int save_file(Editor *ed, const char *filename) {
+    int need_chmod = 0;
+    mode_t old_mode = 0644;
+
+    struct stat st;
+    if (stat(filename, &st) == 0) {
+        old_mode = st.st_mode & 07777;
+        if (!(old_mode & S_IWUSR)) {
+            if (chmod(filename, old_mode | S_IWUSR) != 0) {
+                draw_status_bar(ed, "No se pudo cambiar permisos para guardar.");
+                return 0;
+            }
+            need_chmod = 1;
+        }
+    }
+
     FILE *fp = fopen(filename, "w");
     if (!fp) {
+        if (need_chmod) chmod(filename, old_mode);
         draw_status_bar(ed, "Error al guardar archivo");
         return 0;
     }
+
     for (int i = 0; i < ed->num_lines; i++) {
         if (fputs(ed->buffer[i], fp) == EOF) {
             fclose(fp);
+            if (need_chmod) chmod(filename, old_mode);
             draw_status_bar(ed, "Error al guardar");
             return 0;
         }
@@ -468,19 +581,26 @@ int save_file(Editor *ed, const char *filename) {
         fputc('\n', fp);
     }
     if (fclose(fp) != 0) {
+        if (need_chmod) chmod(filename, old_mode);
         draw_status_bar(ed, "Error al cerrar archivo");
         return 0;
     }
-    /* Corregir posible doble free: duplicar antes de liberar */
-    char *new_filename = my_strdup(filename);
-    if (!new_filename) {
-        draw_status_bar(ed, "Error de memoria al guardar");
-        return 0;
+
+    if (need_chmod) {
+        chmod(filename, old_mode);
+        draw_status_bar(ed, "Archivo guardado (permisos restaurados)");
+    } else {
+        draw_status_bar(ed, "Archivo guardado");
     }
-    free(ed->filename);
-    ed->filename = new_filename;
+
+    char *new_filename = my_strdup(filename);
+    if (new_filename) {
+        free(ed->filename);
+        ed->filename = new_filename;
+    }
     ed->modified = 0;
-    draw_status_bar(ed, "Archivo guardado");
+    ed->readonly = 0;
+    ed->welcome_shown = 0;
     return 1;
 }
 
@@ -497,10 +617,13 @@ void draw_screen(Editor *ed) {
     char title[512];
     if (ed->filename) {
         char *safe_name = sanitize_string(ed->filename);
-        snprintf(title, sizeof(title), " lye - Lynds Editor    %s%s", safe_name, ed->modified ? " (modificado)" : "");
+        snprintf(title, sizeof(title), " lye - Lynds Editor    %s%s%s", safe_name,
+                 ed->modified ? " (modificado)" : "",
+                 ed->readonly ? " [solo lectura]" : "");
         free(safe_name);
     } else {
-        snprintf(title, sizeof(title), " lye - Lynds Editor    Búfer nuevo%s", ed->modified ? " (modificado)" : "");
+        snprintf(title, sizeof(title), " lye - Lynds Editor    Búfer nuevo%s",
+                 ed->modified ? " (modificado)" : "");
     }
     draw_truncated_utf8(0, 2, cols - 4, title);
     attroff(A_REVERSE);
@@ -713,6 +836,7 @@ void insert_char(Editor *ed, char c) {
     ed->buffer[ed->cursor_y] = new_line;
     ed->cursor_x++;
     ed->modified = 1;
+    ed->welcome_shown = 1;
     adjust_view(ed);
 }
 
@@ -724,6 +848,7 @@ void delete_char(Editor *ed) {
         memmove(ed->buffer[ed->cursor_y] + ed->cursor_x - 1, ed->buffer[ed->cursor_y] + ed->cursor_x, line_len - ed->cursor_x + 1);
         ed->cursor_x--;
         ed->modified = 1;
+        ed->welcome_shown = 1;
     } else if (ed->cursor_y > 0) {
         push_history(ed);
         size_t prev_len = strlen(ed->buffer[ed->cursor_y - 1]);
@@ -740,6 +865,7 @@ void delete_char(Editor *ed) {
         ed->cursor_y--;
         ed->cursor_x = (int)prev_len;
         ed->modified = 1;
+        ed->welcome_shown = 1;
     }
     adjust_view(ed);
 }
@@ -757,6 +883,7 @@ void insert_newline(Editor *ed) {
         ed->cursor_y = ed->num_lines;
         ed->cursor_x = 0;
         ed->modified = 1;
+        ed->welcome_shown = 1;
         adjust_view(ed);
         return;
     }
@@ -776,6 +903,7 @@ void insert_newline(Editor *ed) {
     ed->cursor_y++;
     ed->cursor_x = 0;
     ed->modified = 1;
+    ed->welcome_shown = 1;
     adjust_view(ed);
 }
 
@@ -788,6 +916,7 @@ void delete_current_line(Editor *ed) {
         if (!ed->buffer[0]) return;
         ed->cursor_x = 0;
         ed->modified = 1;
+        ed->welcome_shown = 1;
         return;
     }
     push_history(ed);
@@ -797,6 +926,7 @@ void delete_current_line(Editor *ed) {
     if (ed->cursor_y >= ed->num_lines) ed->cursor_y = ed->num_lines;
     ed->cursor_x = 0;
     ed->modified = 1;
+    ed->welcome_shown = 1;
     adjust_view(ed);
 }
 
@@ -840,6 +970,7 @@ void paste_clipboard(Editor *ed) {
     ed->cursor_y = insert_after + ed->clipboard_lines;
     ed->cursor_x = 0;
     ed->modified = 1;
+    ed->welcome_shown = 1;
     adjust_view(ed);
     draw_status_bar(ed, "Pegado");
 }
@@ -1033,6 +1164,7 @@ void handle_input(Editor *ed, int ch) {
                 push_history(ed);
                 memmove(ed->buffer[ed->cursor_y] + ed->cursor_x, ed->buffer[ed->cursor_y] + ed->cursor_x + 1, strlen(ed->buffer[ed->cursor_y] + ed->cursor_x));
                 ed->modified = 1;
+                ed->welcome_shown = 1;
             } else if (ed->cursor_y < ed->num_lines - 1) {
                 push_history(ed);
                 size_t curr_len = strlen(ed->buffer[ed->cursor_y]);
@@ -1045,6 +1177,7 @@ void handle_input(Editor *ed, int ch) {
                 for (int i = ed->cursor_y + 1; i < ed->num_lines - 1; i++) ed->buffer[i] = ed->buffer[i + 1];
                 ed->num_lines--;
                 ed->modified = 1;
+                ed->welcome_shown = 1;
             }
             adjust_view(ed);
             break;
@@ -1070,20 +1203,27 @@ int main(int argc, char *argv[]) {
     ed.message[0] = '\0';
     ed.msg_timeout = 0;
     ed.last_search[0] = '\0';
+    ed.readonly = 0;
+    ed.welcome_shown = 0;
+    ed.original_mode = 0644;
 
     init_curses();
     global_ed = &ed;
     signal(SIGWINCH, handle_resize);
 
-    if (argc > 1) load_file(&ed, argv[1]);
-    else {
+    if (argc > 1) {
+        load_file(&ed, argv[1]);
+    } else {
         ed.buffer = malloc(sizeof(char *));
         if (!ed.buffer) { cleanup(); return 1; }
         ed.buffer[0] = my_strdup("");
         if (!ed.buffer[0]) { free(ed.buffer); cleanup(); return 1; }
         ed.num_lines = 1;
         ed.filename = NULL;
+        ed.readonly = 0;
+        ed.welcome_shown = 0;
         adjust_view(&ed);
+        draw_status_bar(&ed, "Bienvenido a lye. Pulse ^G para ayuda.");
     }
 
     draw_screen(&ed);
