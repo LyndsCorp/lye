@@ -239,79 +239,76 @@ static int get_color_pair(ColorSpec *cs) {
     }
     if (pair_count < MAX_SEGMENTS && g_color_pair_counter < COLOR_PAIRS) {
         int pair_num = g_color_pair_counter++;
-        init_pair(pair_num, cs->fg, cs->bg);
+        init_pair(pair_num, cs->fg, cs->bg);  // -1 es válido gracias a use_default_colors()
         pairs[pair_count][0] = cs->fg;
         pairs[pair_count][1] = cs->bg;
         pairs[pair_count][2] = pair_num;
         pair_count++;
         return pair_num;
     }
-    return 0;
+    // Si no hay más pares, devolver 0 (sin color) o reutilizar el primero
+    return (pair_count > 0) ? pairs[0][2] : 0;
 }
 
 static int compile_regex(regex_t *preg, const char *pattern, int cflags) {
     int ret = regcomp(preg, pattern, cflags);
     if (ret == 0) return 0;
 
+    // Expandir secuencias de escape de nano con realloc dinámico
     size_t len = strlen(pattern);
-    char *modified = malloc(len * 4 + 32);
+    char *modified = NULL;
+    size_t mod_cap = len * 4 + 32;
+    modified = malloc(mod_cap);
     if (!modified) return ret;
     size_t j = 0;
 
     for (size_t i = 0; i < len; i++) {
         if (pattern[i] == '\\' && i + 1 < len) {
             char next = pattern[i + 1];
+            const char *expansion = NULL;
+            size_t exp_len = 0;
             switch (next) {
-                case '>':
-                    strcpy(modified + j, "([^[:alnum:]_]|$)");
-                    j += strlen("([^[:alnum:]_]|$)");
-                    i++;
-                    break;
-                case '<':
-                    strcpy(modified + j, "(^|[^[:alnum:]_])");
-                    j += strlen("(^|[^[:alnum:]_])");
-                    i++;
-                    break;
-                case 's':
-                    strcpy(modified + j, "[[:space:]]");
-                    j += strlen("[[:space:]]");
-                    i++;
-                    break;
-                case 'S':
-                    strcpy(modified + j, "[^[:space:]]");
-                    j += strlen("[^[:space:]]");
-                    i++;
-                    break;
-                case 'w':
-                    strcpy(modified + j, "[[:alnum:]_]");
-                    j += strlen("[[:alnum:]_]");
-                    i++;
-                    break;
-                case 'B':
-                    strcpy(modified + j, "[^[:alnum:]_]");
-                    j += strlen("[^[:alnum:]_]");
-                    i++;
-                    break;
-                case 'd':
-                    strcpy(modified + j, "[[:digit:]]");
-                    j += strlen("[[:digit:]]");
-                    i++;
-                    break;
-                case '"':
-                    modified[j++] = '"';
-                    i++;
-                    break;
-                case '\\':
-                    modified[j++] = '\\';
-                    i++;
-                    break;
+                case '>': expansion = "([^[:alnum:]_]|$)"; exp_len = strlen(expansion); break;
+                case '<': expansion = "(^|[^[:alnum:]_])"; exp_len = strlen(expansion); break;
+                case 's': expansion = "[[:space:]]"; exp_len = strlen(expansion); break;
+                case 'S': expansion = "[^[:space:]]"; exp_len = strlen(expansion); break;
+                case 'w': expansion = "[[:alnum:]_]"; exp_len = strlen(expansion); break;
+                case 'B': expansion = "[^[:alnum:]_]"; exp_len = strlen(expansion); break;
+                case 'd': expansion = "[[:digit:]]"; exp_len = strlen(expansion); break;
+                case '"': expansion = "\""; exp_len = 1; break;
+                case '\\': expansion = "\\\\"; exp_len = 2; break;
                 default:
+                    // Copiar tal cual
+                    if (j + 2 >= mod_cap) {
+                        mod_cap *= 2;
+                        char *new_mod = realloc(modified, mod_cap);
+                        if (!new_mod) { free(modified); return ret; }
+                        modified = new_mod;
+                    }
                     modified[j++] = pattern[i];
-                    modified[j++] = pattern[i + 1];
+                    modified[j++] = pattern[i+1];
                     i++;
-                    break;
+                    continue;
+            }
+            if (expansion) {
+                if (j + exp_len >= mod_cap) {
+                    mod_cap = (j + exp_len + 1) * 2;
+                    char *new_mod = realloc(modified, mod_cap);
+                    if (!new_mod) { free(modified); return ret; }
+                    modified = new_mod;
+                }
+                memcpy(modified + j, expansion, exp_len);
+                j += exp_len;
+                i++; // saltar el carácter escapado
+                continue;
             }
         } else {
+            if (j + 1 >= mod_cap) {
+                mod_cap *= 2;
+                char *new_mod = realloc(modified, mod_cap);
+                if (!new_mod) { free(modified); return ret; }
+                modified = new_mod;
+            }
             modified[j++] = pattern[i];
         }
     }
@@ -550,7 +547,7 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  ed->syntax_rule = rule;
                                                                  ed->syntax_state = calloc(rule->startend_rules_count, sizeof(int));
                                                                  fprintf(stderr, "[nanorc] Sintaxis para '%s' -> regla '%s' (%d color rules, %d start/end rules) del archivo '%s'\n",
-                                                                         filename, rule->name, rule->color_rules_count, rule->startend_rules_count, rule->source_file);
+                                                                         filename ? filename : "(null)", rule->name, rule->color_rules_count, rule->startend_rules_count, rule->source_file);
                                                              } else {
                                                                  ed->syntax_rule = NULL;
                                                                  ed->syntax_state = NULL;
@@ -565,40 +562,84 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                              }
                                                          }
 
-                                                         /* Inicializa el estado de reglas start/end para la línea line_index */
-                                                         static void initialize_startend_states(Editor *ed, int line_index) {
+                                                         /* Calcula y almacena en caché los estados para la línea dada (y todas las anteriores si no están cacheadas) */
+                                                         static void compute_line_states(Editor *ed, int line_index) {
                                                              SyntaxRule *rule = (SyntaxRule *)ed->syntax_rule;
                                                              if (!rule || !ed->syntax_state) return;
-                                                             for (int i = 0; i < rule->startend_rules_count; i++) {
-                                                                 int state = 0;
-                                                                 for (int l = 0; l < line_index; l++) {
-                                                                     if (l >= ed->num_lines) break;
-                                                                     const char *line = ed->buffer[l];
-                                                                     if (!line) continue;
-                                                                     if (!state) {
+                                                             if (line_index >= ed->line_states_capacity) {
+                                                                 int new_cap = line_index + 1;
+                                                                 int **new_states = realloc(ed->line_states, new_cap * sizeof(int *));
+                                                                 if (!new_states) return;
+                                                                 for (int i = ed->line_states_capacity; i < new_cap; i++) {
+                                                                     new_states[i] = NULL;
+                                                                 }
+                                                                 ed->line_states = new_states;
+                                                                 ed->line_states_capacity = new_cap;
+                                                             }
+                                                             // Si ya está calculado, no hacer nada
+                                                             if (ed->line_states[line_index]) return;
+
+                                                             // Calcular desde la línea anterior si existe, o desde 0
+                                                             int start_line = 0;
+                                                             int *prev_state = NULL;
+                                                             if (line_index > 0 && ed->line_states[line_index - 1]) {
+                                                                 start_line = line_index;
+                                                                 prev_state = ed->line_states[line_index - 1];
+                                                             } else {
+                                                                 start_line = 0;
+                                                                 prev_state = NULL;
+                                                             }
+
+                                                             int *state = malloc(rule->startend_rules_count * sizeof(int));
+                                                             if (!state) return;
+                                                             // Inicializar con el estado anterior o todo 0
+                                                             if (prev_state) {
+                                                                 memcpy(state, prev_state, rule->startend_rules_count * sizeof(int));
+                                                             } else {
+                                                                 memset(state, 0, rule->startend_rules_count * sizeof(int));
+                                                             }
+
+                                                             // Recorrer líneas desde start_line hasta line_index inclusive, actualizando el estado
+                                                             for (int l = start_line; l <= line_index; l++) {
+                                                                 if (l >= ed->num_lines) break;
+                                                                 const char *line = ed->buffer[l];
+                                                                 if (!line) continue;
+                                                                 for (int i = 0; i < rule->startend_rules_count; i++) {
+                                                                     StartEndRule *ser = &rule->startend_rules[i];
+                                                                     if (!state[i]) {
                                                                          regmatch_t match;
-                                                                         if (regexec(&rule->startend_rules[i].start_regex, line, 1, &match, 0) == 0) {
-                                                                             state = 1;
+                                                                         if (regexec(&ser->start_regex, line, 1, &match, 0) == 0) {
+                                                                             state[i] = 1;
                                                                              const char *after_start = line + match.rm_eo;
                                                                              regmatch_t end_match;
-                                                                             if (regexec(&rule->startend_rules[i].end_regex, after_start, 1, &end_match, 0) == 0) {
-                                                                                 state = 0;
+                                                                             if (regexec(&ser->end_regex, after_start, 1, &end_match, 0) == 0) {
+                                                                                 state[i] = 0;
                                                                              }
                                                                          }
                                                                      } else {
                                                                          regmatch_t match;
-                                                                         if (regexec(&rule->startend_rules[i].end_regex, line, 1, &match, 0) == 0) {
-                                                                             state = 0;
+                                                                         if (regexec(&ser->end_regex, line, 1, &match, 0) == 0) {
+                                                                             state[i] = 0;
                                                                              const char *after_end = line + match.rm_eo;
                                                                              regmatch_t start_match;
-                                                                             if (regexec(&rule->startend_rules[i].start_regex, after_end, 1, &start_match, 0) == 0) {
-                                                                                 state = 1;
+                                                                             if (regexec(&ser->start_regex, after_end, 1, &start_match, 0) == 0) {
+                                                                                 state[i] = 1;
                                                                              }
                                                                          }
                                                                      }
                                                                  }
-                                                                 ed->syntax_state[i] = state;
+                                                                 // Guardar el estado para esta línea (solo para líneas anteriores a la solicitada si las calculamos)
+                                                                 if (l < line_index) {
+                                                                     if (!ed->line_states[l]) {
+                                                                         ed->line_states[l] = malloc(rule->startend_rules_count * sizeof(int));
+                                                                         if (ed->line_states[l]) {
+                                                                             memcpy(ed->line_states[l], state, rule->startend_rules_count * sizeof(int));
+                                                                         }
+                                                                     }
+                                                                 }
                                                              }
+                                                             // Almacenar el estado final para la línea solicitada
+                                                             ed->line_states[line_index] = state;
                                                          }
 
                                                          void apply_syntax_to_line(Editor *ed, int line_index,
@@ -610,10 +651,8 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  return;
                                                              }
 
-                                                             // Si es la primera línea visible, recalcular estados desde el inicio
-                                                             if (line_index == ed->top_line) {
-                                                                 initialize_startend_states(ed, line_index);
-                                                             }
+                                                             // Asegurar que los estados para esta línea estén cacheados
+                                                             compute_line_states(ed, line_index);
 
                                                              char *line = ed->buffer[line_index];
                                                              int line_len = strlen(line);
@@ -634,7 +673,7 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  attr_map[i] = 0;
                                                              }
 
-                                                             // Aplicar reglas simples en orden; las posteriores sobrescriben
+                                                             // Aplicar reglas simples
                                                              for (int i = 0; i < rule->color_rules_count; i++) {
                                                                  ColorRule *cr = &rule->color_rules[i];
                                                                  regmatch_t match;
@@ -659,10 +698,10 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  }
                                                              }
 
-                                                             // Aplicar reglas start/end con persistencia de estado
+                                                             // Aplicar reglas start/end usando el estado cachead
                                                              for (int i = 0; i < rule->startend_rules_count; i++) {
                                                                  StartEndRule *ser = &rule->startend_rules[i];
-                                                                 int state = ed->syntax_state[i];
+                                                                 int state = ed->line_states[line_index][i];
                                                                  int pos = start_col;
 
                                                                  if (!state) {
@@ -672,7 +711,7 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                          int me = match.rm_eo;
                                                                          if (ms < start_col) {
                                                                              state = 1;
-                                                                             ed->syntax_state[i] = 1;
+                                                                             ed->line_states[line_index][i] = 1;
                                                                              pos = start_col;
                                                                          } else if (ms < end_col) {
                                                                              if (me > end_col) me = end_col;
@@ -685,7 +724,7 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                                  }
                                                                              }
                                                                              state = 1;
-                                                                             ed->syntax_state[i] = 1;
+                                                                             ed->line_states[line_index][i] = 1;
                                                                              pos = me;
                                                                          } else {
                                                                              continue;
@@ -717,7 +756,7 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                              }
                                                                          }
                                                                          state = 0;
-                                                                         ed->syntax_state[i] = 0;
+                                                                         ed->line_states[line_index][i] = 0;
                                                                          pos = me;
                                                                          break;
                                                                          } else {
@@ -729,12 +768,13 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                                      attr_map[j - start_col] = attrs;
                                                                                  }
                                                                              }
-                                                                             ed->syntax_state[i] = 1;
+                                                                             ed->line_states[line_index][i] = 1;
                                                                              break;
                                                                          }
                                                                  }
                                                              }
 
+                                                             // Generar segmentos
                                                              int current_pair = color_map[0];
                                                              int current_attrs = attr_map[0];
                                                              int current_start = start_col;
