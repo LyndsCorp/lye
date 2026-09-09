@@ -517,6 +517,15 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                      globfree(&globbuf);
                                                                  }
                                                              }
+
+                                                             /* Forzar coloración del cierre de comentario en C */
+                                                             for (SyntaxRule *rule = g_syntax_list; rule; rule = rule->next) {
+                                                                 if (strcmp(rule->name, "c") == 0 || strstr(rule->source_file, "c.nanorc") != NULL) {
+                                                                     add_color_rule(rule, "brightblue", "\\*/", 0);
+                                                                     break;
+                                                                 }
+                                                             }
+
                                                              fprintf(stderr, "[nanorc] Cargadas %d reglas de sintaxis\n", g_total_rules_loaded);
                                                          }
 
@@ -576,10 +585,8 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  ed->line_states = new_states;
                                                                  ed->line_states_capacity = new_cap;
                                                              }
-                                                             // Si ya está calculado, no hacer nada
                                                              if (ed->line_states[line_index]) return;
 
-                                                             // Calcular desde la línea anterior si existe, o desde 0
                                                              int start_line = 0;
                                                              int *prev_state = NULL;
                                                              if (line_index > 0 && ed->line_states[line_index - 1]) {
@@ -592,14 +599,12 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
 
                                                              int *state = malloc(rule->startend_rules_count * sizeof(int));
                                                              if (!state) return;
-                                                             // Inicializar con el estado anterior o todo 0
                                                              if (prev_state) {
                                                                  memcpy(state, prev_state, rule->startend_rules_count * sizeof(int));
                                                              } else {
                                                                  memset(state, 0, rule->startend_rules_count * sizeof(int));
                                                              }
 
-                                                             // Recorrer líneas desde start_line hasta line_index inclusive, actualizando el estado
                                                              for (int l = start_line; l <= line_index; l++) {
                                                                  if (l >= ed->num_lines) break;
                                                                  const char *line = ed->buffer[l];
@@ -628,7 +633,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                          }
                                                                      }
                                                                  }
-                                                                 // Guardar el estado para esta línea (solo para líneas anteriores a la solicitada si las calculamos)
                                                                  if (l < line_index) {
                                                                      if (!ed->line_states[l]) {
                                                                          ed->line_states[l] = malloc(rule->startend_rules_count * sizeof(int));
@@ -638,7 +642,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                      }
                                                                  }
                                                              }
-                                                             // Almacenar el estado final para la línea solicitada
                                                              ed->line_states[line_index] = state;
                                                          }
 
@@ -651,7 +654,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  return;
                                                              }
 
-                                                             // Asegurar que los estados para esta línea estén cacheados
                                                              compute_line_states(ed, line_index);
 
                                                              char *line = ed->buffer[line_index];
@@ -771,6 +773,19 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                              ed->line_states[line_index][i] = 1;
                                                                              break;
                                                                          }
+                                                                 }
+                                                             }
+
+                                                             // Forzar coloración de */ en C (directo en el mapa de colores)
+                                                             if (rule->name && strcmp(rule->name, "c") == 0) {
+                                                                 for (int idx = start_col; idx < end_col - 1; idx++) {
+                                                                     if (line[idx] == '*' && line[idx+1] == '/') {
+                                                                         int pair = get_color_pair(&(ColorSpec){.fg=12, .bg=-1, .attrs=A_BOLD});
+                                                                         for (int j = idx; j < idx+2 && j < end_col; j++) {
+                                                                             color_map[j - start_col] = pair;
+                                                                             attr_map[j - start_col] = A_BOLD;
+                                                                         }
+                                                                     }
                                                                  }
                                                              }
 
