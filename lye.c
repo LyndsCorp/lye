@@ -1,9 +1,8 @@
 /*
  * lye - Lynds Editor
  * Editor de texto TUI en C11 inspirado en GNU nano.
- * Interfaz en español, con atajos y números de línea.
- * Con resaltado de sintaxis mediante archivos .nanorc.
- */
+ * Copyright (C) 2026 David Baña Szymaniak
+*/
 
 #define _GNU_SOURCE
 
@@ -319,6 +318,10 @@ int check_resize_ncurses(Editor *ed) {
     return 0;
 }
 
+/* IMPORTANTE: free_buffer solo libera el buffer. NO debe tocar
+ *  ed->syntax_rule ni ed->syntax_state, porque undo/redo lo usan para
+ *  reemplazar el buffer y necesitan conservar el resaltado. La gestión
+ *  del estado de sintaxis la hace set_current_syntax(). */
 void free_buffer(Editor *ed) {
     if (ed->buffer) {
         for (int i = 0; i < ed->num_lines; i++) free(ed->buffer[i]);
@@ -326,11 +329,6 @@ void free_buffer(Editor *ed) {
         ed->buffer = NULL;
     }
     ed->num_lines = 0;
-    if (ed->syntax_state) {
-        free(ed->syntax_state);
-        ed->syntax_state = NULL;
-        ed->syntax_rule = NULL;
-    }
     invalidate_syntax_cache(ed);
 }
 
@@ -467,7 +465,7 @@ void undo(Editor *ed) {
             draw_status_bar(ed, "Error al deshacer");
             return;
         }
-        free_buffer(ed);
+        free_buffer(ed);   // ya no toca syntax_rule/syntax_state
         ed->buffer = new_buffer;
         ed->num_lines = new_num_lines;
         ed->cursor_x = ed->history.cursor_x[ed->history.index];
@@ -495,7 +493,7 @@ void redo(Editor *ed) {
             draw_status_bar(ed, "Error al rehacer");
             return;
         }
-        free_buffer(ed);
+        free_buffer(ed);   // ya no toca syntax_rule/syntax_state
         ed->buffer = new_buffer;
         ed->num_lines = new_num_lines;
         ed->cursor_x = ed->history.cursor_x[ed->history.index];
@@ -1366,17 +1364,15 @@ void goto_line(Editor *ed) {
     char *endptr;
     errno = 0;
     long line_num = strtol(input, &endptr, 10);
-    // Si hay error de desbordamiento o no se leyó ningún número, tratamos como inválido
     if (errno == ERANGE || *endptr != '\0' || endptr == input) {
         draw_status_bar(ed, "Número de línea inválido");
         return;
     }
-    // Límites: líneas van de 1 a num_lines+1 (la línea extra)
     long total = ed->num_lines + 1;
     if (line_num < 1) {
-        ed->cursor_y = 0;  // primera línea
+        ed->cursor_y = 0;
     } else if (line_num > total) {
-        ed->cursor_y = ed->num_lines;  // última línea (extra)
+        ed->cursor_y = ed->num_lines;
     } else {
         ed->cursor_y = (int)(line_num - 1);
     }
@@ -1649,6 +1645,8 @@ int main(int argc, char *argv[]) {
     }
 
     free_buffer(&ed);
+    free(ed.syntax_state);
+    ed.syntax_state = NULL;
     free_clipboard(&ed);
     free_history(&ed);
     free_syntax_rules();
