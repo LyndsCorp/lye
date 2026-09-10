@@ -3,7 +3,7 @@
  * Editor de texto TUI en C11 inspirado en GNU nano.
  * Interfaz en español, con atajos y números de línea.
  * Con resaltado de sintaxis mediante archivos .nanorc.
-*/
+ */
 
 #define _GNU_SOURCE
 
@@ -267,24 +267,38 @@ void adjust_view(Editor *ed) {
     int block_width = edit_cols - 1;
     if (block_width <= 0) block_width = 1;
 
+    /* El renglón "extra" (cursor_y == num_lines) no existe en el buffer.
+     *      Hay que tratarlo como cadena vacía para no leer fuera de rango. */
+    const char *cursor_line =
+    (ed->cursor_y >= 0 && ed->cursor_y < ed->num_lines)
+    ? ed->buffer[ed->cursor_y]
+    : "";
+
+    /* Protección por si cursor_x quedara fuera de la línea (defensivo). */
+    int clen = (int)strlen(cursor_line);
+    if (ed->cursor_x > clen) ed->cursor_x = clen;
+    if (ed->cursor_x < 0) ed->cursor_x = 0;
+
     if (ed->cursor_x < ed->left_col) {
         ed->left_col = ed->cursor_x;
     }
-    int vis_width = visual_width_until(ed->buffer[ed->cursor_y], ed->cursor_x);
+    int vis_width = visual_width_until(cursor_line, ed->cursor_x);
     if (vis_width >= ed->left_col + block_width) {
         int target = vis_width - block_width + 1;
         int byte_off = 0;
-        const char *line = ed->buffer[ed->cursor_y];
+        const char *line = cursor_line;
         int w = 0;
-        while (byte_off < ed->cursor_x) {
-            int next = next_char_pos(line, byte_off, strlen(line));
+        while (byte_off < ed->cursor_x && byte_off < clen) {
+            int next = next_char_pos(line, byte_off, clen);
             char tmp[8];
             int l = next - byte_off;
+            if (l <= 0 || l >= (int)sizeof(tmp)) break;
             memcpy(tmp, line + byte_off, l);
             tmp[l] = '\0';
             wchar_t wc;
-            mbtowc(&wc, tmp, l);
+            if (mbtowc(&wc, tmp, l) < 0) break;
             int cw = wcwidth(wc);
+            if (cw < 0) cw = 0;
             if (w + cw > target) break;
             w += cw;
             byte_off = next;
@@ -755,10 +769,14 @@ int next_char_pos(const char *s, int pos, int len) {
 }
 
 int visual_width_until(const char *line, int pos) {
+    if (pos <= 0) return 0;
     char *tmp = strndup(line, pos);
+    if (!tmp) return 0;
     wchar_t *wcs = calloc(pos + 1, sizeof(wchar_t));
+    if (!wcs) { free(tmp); return 0; }
     size_t n = mbstowcs(wcs, tmp, pos);
-    int width = wcswidth(wcs, n);
+    int width = 0;
+    if (n != (size_t)-1) width = wcswidth(wcs, n);
     free(tmp);
     free(wcs);
     return width;
@@ -1443,14 +1461,15 @@ void handle_input(Editor *ed, int ch) {
             draw_screen(ed);
             break;
         case KEY_LEFT:
-            if (ed->cursor_x > 0) ed->cursor_x = prev_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x);
-            else if (ed->cursor_y > 0) {
-                ed->cursor_y--;
-                ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
-                ed->left_col = 0;
-            }
-            adjust_view(ed);
-            break;
+            if (ed->cursor_y < ed->num_lines && ed->cursor_x > 0)
+                ed->cursor_x = prev_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x);
+        else if (ed->cursor_y > 0) {
+            ed->cursor_y--;
+            ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
+            ed->left_col = 0;
+        }
+        adjust_view(ed);
+        break;
         case KEY_RIGHT:
             if (ed->cursor_y < ed->num_lines && ed->cursor_x < (int)strlen(ed->buffer[ed->cursor_y]))
                 ed->cursor_x = next_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x, strlen(ed->buffer[ed->cursor_y]));
