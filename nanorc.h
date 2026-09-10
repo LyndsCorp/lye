@@ -538,6 +538,31 @@ do { if (lye_debug_enabled()) fprintf(stderr, __VA_ARGS__); } while (0)
                                                                      }
                                                                  }
 
+                                                                 /* Regla integrada para mensajes de commit de git: colorea en azul
+                                                                  * (navy) las líneas que empiezan por '#', como hace git en su
+                                                                  * editor por defecto. Se registra después de cargar los .nanorc
+                                                                  * para que gane frente a reglas del usuario con filename_regex
+                                                                  * de longitud igual o menor. */
+                                                                 {
+                                                                     SyntaxRule *git_rule = calloc(1, sizeof(SyntaxRule));
+                                                                     if (git_rule) {
+                                                                         git_rule->name = strdup("gitcommit");
+                                                                         git_rule->source_file = strdup("(builtin)");
+                                                                         const char *fname_re = "COMMIT_EDITMSG$";
+                                                                         git_rule->filename_regex_len = strlen(fname_re);
+                                                                         if (compile_regex(&git_rule->filename_regex, fname_re, REG_EXTENDED) == 0) {
+                                                                             add_color_rule(git_rule, "blue", "^#.*", 0);
+                                                                             git_rule->next = g_syntax_list;
+                                                                             g_syntax_list = git_rule;
+                                                                             g_total_rules_loaded++;
+                                                                         } else {
+                                                                             free(git_rule->name);
+                                                                             free(git_rule->source_file);
+                                                                             free(git_rule);
+                                                                         }
+                                                                     }
+                                                                 }
+
                                                                  LYE_DEBUG_LOG("[nanorc] Cargadas %d reglas de sintaxis\n", g_total_rules_loaded);
                                                              }
 
