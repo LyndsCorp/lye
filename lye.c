@@ -628,6 +628,7 @@ char **duplicate_buffer(Editor *ed, int *num_lines_out) {
 
 void push_history(Editor *ed) {
     if (ed->history.count >= ed->history.max) {
+        // Liberar la entrada más antigua
         for (int j = 0; j < ed->history.num_lines[0]; j++) free(ed->history.buffers[0][j]);
         free(ed->history.buffers[0]);
         memmove(ed->history.buffers, ed->history.buffers + 1, (ed->history.count - 1) * sizeof(char **));
@@ -637,6 +638,19 @@ void push_history(Editor *ed) {
         ed->history.count--;
         if (ed->history.index > 0) ed->history.index--;
     }
+
+    /* Truncar las entradas de redo pendientes antes de añadir una nueva.
+     * Sin esto, tras varios undo() los estados "futuros" quedaban vivos
+     * y redo() podía alcanzarlos aunque el usuario ya hubiera editado. */
+    if (ed->history.index >= 0 && ed->history.index < ed->history.count - 1) {
+        for (int i = ed->history.index + 1; i < ed->history.count; i++) {
+            for (int j = 0; j < ed->history.num_lines[i]; j++)
+                free(ed->history.buffers[i][j]);
+            free(ed->history.buffers[i]);
+        }
+        ed->history.count = ed->history.index + 1;
+    }
+
     int num_lines_copy;
     char **copy = duplicate_buffer(ed, &num_lines_copy);
     if (!copy) return;
@@ -679,12 +693,6 @@ void push_history(Editor *ed) {
     ed->history.cursor_y[ed->history.count] = ed->cursor_y;
     ed->history.count++;
     ed->history.index = ed->history.count - 1;
-
-    for (int i = ed->history.index + 1; i < ed->history.count; i++) {
-        for (int j = 0; j < ed->history.num_lines[i]; j++) free(ed->history.buffers[i][j]);
-        free(ed->history.buffers[i]);
-    }
-    ed->history.count = ed->history.index + 1;
 
     invalidate_syntax_cache(ed);
 }
@@ -1927,11 +1935,24 @@ int main(int argc, char *argv[]) {
                 int ch = (int)wc;
                 handle_input(&ed, ch);
             } else {
-                char mb[MB_CUR_MAX + 1];
-                int len = wctomb(mb, (wchar_t)wc);
-                if (len > 0) {
-                    mb[len] = '\0';
-                    insert_string(&ed, mb);
+                /* ¿Es un atajo configurado que usa un carácter imprimible?
+                 * Si el usuario puso Cut=k en ~/.lyerc, hay que darle
+                 * prioridad sobre la inserción de texto. */
+                int matched = 0;
+                for (int i = 0; i < ACT_COUNT; i++) {
+                    if (g_actions[i].keycode == (int)wc) {
+                        handle_input(&ed, (int)wc);
+                        matched = 1;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    char mb[MB_CUR_MAX + 1];
+                    int len = wctomb(mb, (wchar_t)wc);
+                    if (len > 0) {
+                        mb[len] = '\0';
+                        insert_string(&ed, mb);
+                    }
                 }
             }
         }
