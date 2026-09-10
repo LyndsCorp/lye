@@ -54,6 +54,9 @@ static SyntaxRule *g_syntax_list = NULL;
 static int g_color_pair_counter = 6;
 static int g_total_rules_loaded = 0;
 
+/* Definido en lye.c. Si es 0, set_current_syntax() no hace nada. */
+extern int g_use_nanorc;
+
 void init_syntax_highlighting(void);
 void set_current_syntax(Editor *ed, const char *filename);
 void reset_syntax_state(Editor *ed);
@@ -73,7 +76,6 @@ static char *trim(char *str);
 static int compile_regex(regex_t *preg, const char *pattern, int cflags);
 static int parse_hex_color(const char *hex);
 static int color_name_to_index(const char *name);
-// La función initialize_startend_states ha sido eliminada (ya no se usa)
 
 /* ------------------------------------------------------------------------- */
 /* Implementación                                                            */
@@ -239,14 +241,13 @@ static int get_color_pair(ColorSpec *cs) {
     }
     if (pair_count < MAX_SEGMENTS && g_color_pair_counter < COLOR_PAIRS) {
         int pair_num = g_color_pair_counter++;
-        init_pair(pair_num, cs->fg, cs->bg);  // -1 es válido gracias a use_default_colors()
+        init_pair(pair_num, cs->fg, cs->bg);
         pairs[pair_count][0] = cs->fg;
         pairs[pair_count][1] = cs->bg;
         pairs[pair_count][2] = pair_num;
         pair_count++;
         return pair_num;
     }
-    // Si no hay más pares, devolver 0 (sin color) o reutilizar el primero
     return (pair_count > 0) ? pairs[0][2] : 0;
 }
 
@@ -254,7 +255,6 @@ static int compile_regex(regex_t *preg, const char *pattern, int cflags) {
     int ret = regcomp(preg, pattern, cflags);
     if (ret == 0) return 0;
 
-    // Expandir secuencias de escape de nano con realloc dinámico
     size_t len = strlen(pattern);
     char *modified = NULL;
     size_t mod_cap = len * 4 + 32;
@@ -278,7 +278,6 @@ static int compile_regex(regex_t *preg, const char *pattern, int cflags) {
                 case '"': expansion = "\""; exp_len = 1; break;
                 case '\\': expansion = "\\\\"; exp_len = 2; break;
                 default:
-                    // Copiar tal cual
                     if (j + 2 >= mod_cap) {
                         mod_cap *= 2;
                         char *new_mod = realloc(modified, mod_cap);
@@ -299,7 +298,7 @@ static int compile_regex(regex_t *preg, const char *pattern, int cflags) {
                 }
                 memcpy(modified + j, expansion, exp_len);
                 j += exp_len;
-                i++; // saltar el carácter escapado
+                i++;
                 continue;
             }
         } else {
@@ -501,6 +500,8 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                          }
 
                                                          void init_syntax_highlighting(void) {
+                                                             if (!g_use_nanorc) return;
+
                                                              glob_t globbuf;
                                                              const char *patterns[] = {
                                                                  "/usr/share/nano/*.nanorc",
@@ -518,7 +519,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  }
                                                              }
 
-                                                             /* Forzar coloración del cierre de comentario en C */
                                                              for (SyntaxRule *rule = g_syntax_list; rule; rule = rule->next) {
                                                                  if (strcmp(rule->name, "c") == 0 || strstr(rule->source_file, "c.nanorc") != NULL) {
                                                                      add_color_rule(rule, "brightblue", "\\*/", 0);
@@ -549,6 +549,11 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  free(ed->syntax_state);
                                                                  ed->syntax_state = NULL;
                                                                  ed->syntax_rule = NULL;
+                                                             }
+
+                                                             /* Si el usuario desactivó nanorc, no hacemos nada. */
+                                                             if (!g_use_nanorc) {
+                                                                 return;
                                                              }
 
                                                              SyntaxRule *rule = find_syntax_for_filename(filename);
@@ -675,7 +680,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  attr_map[i] = 0;
                                                              }
 
-                                                             // Aplicar reglas simples
                                                              for (int i = 0; i < rule->color_rules_count; i++) {
                                                                  ColorRule *cr = &rule->color_rules[i];
                                                                  regmatch_t match;
@@ -700,7 +704,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  }
                                                              }
 
-                                                             // Aplicar reglas start/end usando el estado cachead
                                                              for (int i = 0; i < rule->startend_rules_count; i++) {
                                                                  StartEndRule *ser = &rule->startend_rules[i];
                                                                  int state = ed->line_states[line_index][i];
@@ -776,7 +779,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  }
                                                              }
 
-                                                             // Forzar coloración de */ en C (directo en el mapa de colores)
                                                              if (rule->name && strcmp(rule->name, "c") == 0) {
                                                                  for (int idx = start_col; idx < end_col - 1; idx++) {
                                                                      if (line[idx] == '*' && line[idx+1] == '/') {
@@ -789,7 +791,6 @@ static void add_color_rule(SyntaxRule *rule, const char *colorspec,
                                                                  }
                                                              }
 
-                                                             // Generar segmentos
                                                              int current_pair = color_map[0];
                                                              int current_attrs = attr_map[0];
                                                              int current_start = start_col;

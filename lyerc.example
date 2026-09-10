@@ -1,0 +1,70 @@
+# ============================================================
+#  ~/.lyerc — Configuración de lye (Lynds Editor)
+# ============================================================
+#  - Este archivo es OPCIONAL. Si no existe, se usan los
+#    valores por defecto (los mismos que ves comentados aquí).
+#  - lye NUNCA crea ni modifica este archivo.
+#  - Los nombres de claves y colores no distinguen mayúsculas.
+#  - Las líneas que empiezan por '#' son comentarios.
+# ============================================================
+
+
+# ------------------------------------------------------------
+#  Apariencia
+# ------------------------------------------------------------
+
+# Mostrar números de línea a la izquierda (true / false)
+ShowLines=true
+
+# Color de los números de línea.
+# Valores: black, red, green, yellow, orange, blue,
+#          magenta, cyan, white, grey/gray
+ColorLines=green
+
+# Color de la barra de estado/asistente (mensajes, prompts…)
+AssistantColor=cyan
+
+# Activar resaltado de sintaxis leyendo los .nanorc de nano
+UseNanorc=true
+
+
+# ------------------------------------------------------------
+#  Barra de pistas (la fila inferior con los atajos)
+# ------------------------------------------------------------
+
+# Mostrar u ocultar la barra de pistas
+ShowHints=true
+
+# Qué pistas se muestran y en qué orden.
+# Nombres válidos: Help, Save, SaveAs, Find, FindNext,
+#                  Cut, Paste, Undo, Redo, GotoLine, Exit, Refresh
+Hints=Help, Save, SaveAs, Find, Cut, Exit, GotoLine
+
+
+# ------------------------------------------------------------
+#  Atajos de teclado
+# ------------------------------------------------------------
+#  Formatos admitidos:
+#    ^X            Ctrl+X        (también ^/, ^A..^Z)
+#    F1..F12       Teclas de función
+#    Enter, Tab, Space, Backspace, Delete, Esc
+#    Up, Down, Left, Right
+#    Home, End, PageUp, PageDown
+#    <carácter>    Un carácter literal (ej: q)
+#
+#  Si cambias un atajo, la barra de pistas lo refleja
+#  automáticamente (p. ej. "Cut=F2" → muestra "F2 Cortar").
+# ------------------------------------------------------------
+
+Help=^G
+Save=^S
+SaveAs=^O
+Find=^F
+FindNext=^W
+Cut=^K
+Paste=^U
+Undo=^Z
+Redo=^Y
+GotoLine=^/
+Exit=^X
+Refresh=^L

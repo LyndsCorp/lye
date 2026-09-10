@@ -2,7 +2,7 @@
  * lye - Lynds Editor
  * Editor de texto TUI en C11 inspirado en GNU nano.
  * Copyright (C) 2026 David Baña Szymaniak
-*/
+ */
 
 #define _GNU_SOURCE
 
@@ -27,10 +27,62 @@
 #define VERSION "1.0"
 #define EDITION "lye - Lynds Editor\nPrimera versión de lye.\n¡Espero que te guste! :)"
 
+/* ------------------------------------------------------------------------- */
+/* Configuración (~/.lyerc)                                                  */
+/* ------------------------------------------------------------------------- */
+
+typedef enum {
+    ACT_HELP, ACT_SAVE, ACT_SAVE_AS, ACT_FIND, ACT_FIND_NEXT,
+    ACT_CUT, ACT_PASTE, ACT_UNDO, ACT_REDO, ACT_GOTO, ACT_EXIT, ACT_REFRESH,
+    ACT_COUNT
+} ActionId;
+
+typedef struct {
+    const char *name;        /* clave en ~/.lyerc               */
+    const char *hint_label;  /* etiqueta mostrada en la barra   */
+    const char *default_key; /* valor por defecto               */
+    char key_str[16];        /* valor efectivo                  */
+    int  keycode;            /* código resuelto                 */
+} ActionDef;
+
+static ActionDef g_actions[ACT_COUNT] = {
+    [ACT_HELP]      = {"Help",     "Ayuda",        "^G", "", -1},
+    [ACT_SAVE]      = {"Save",     "Guardar",      "^S", "", -1},
+    [ACT_SAVE_AS]   = {"SaveAs",   "Guardar como", "^O", "", -1},
+    [ACT_FIND]      = {"Find",     "Buscar",       "^F", "", -1},
+    [ACT_FIND_NEXT] = {"FindNext", "Buscar sig.",  "^W", "", -1},
+    [ACT_CUT]       = {"Cut",      "Cortar",       "^K", "", -1},
+    [ACT_PASTE]     = {"Paste",    "Pegar",        "^U", "", -1},
+    [ACT_UNDO]      = {"Undo",     "Deshacer",     "^Z", "", -1},
+    [ACT_REDO]      = {"Redo",     "Rehacer",      "^Y", "", -1},
+    [ACT_GOTO]      = {"GotoLine", "Ir a línea",   "^/", "", -1},
+    [ACT_EXIT]      = {"Exit",     "Salir",        "^X", "", -1},
+    [ACT_REFRESH]   = {"Refresh",  "Refrescar",    "^L", "", -1},
+};
+
+#define MAX_HINTS 32
+
+typedef struct {
+    int  show_lines;             /* ShowLines       */
+    int  color_lines_idx;        /* ColorLines      */
+    int  use_nanorc;             /* UseNanorc       */
+    int  show_hints;             /* ShowHints       */
+    char hints_order[MAX_HINTS][32];
+    int  hints_count;
+    int  assistant_color_idx;    /* AssistantColor  */
+} LyeConfig;
+
+static LyeConfig g_cfg;
+
+/* Lo usa nanorc.h */
+int g_use_nanorc = 1;
+
+/* ------------------------------------------------------------------------- */
+
 typedef struct Editor {
     char **buffer;
     int num_lines;
-    int cursor_x, cursor_y;   // cursor_x es índice de byte dentro de la línea
+    int cursor_x, cursor_y;
     int top_line;
     int left_col;
     int modified;
@@ -39,7 +91,6 @@ typedef struct Editor {
     int msg_timeout;
     char **clipboard;
     int clipboard_lines;
-    // Historial con posición del cursor
     struct {
         char ***buffers;
         int *num_lines;
@@ -54,8 +105,8 @@ typedef struct Editor {
     int welcome_shown;
     mode_t original_mode;
     void *syntax_rule;
-    int *syntax_state;       // estado actual de start/end para la línea actual (se usa al dibujar)
-    int **line_states;       // caché de estados por línea (para cada regla start/end)
+    int *syntax_state;
+    int **line_states;
     int line_states_capacity;
 } Editor;
 
@@ -129,6 +180,198 @@ static const char *g_help_lines[] = {
     "Presione cualquier tecla para volver..."
 };
 static const int g_help_lines_count = sizeof(g_help_lines) / sizeof(g_help_lines[0]);
+
+/* ------------------------------------------------------------------------- */
+/* Helpers de configuración                                                  */
+/* ------------------------------------------------------------------------- */
+
+static int ci_strcmp(const char *a, const char *b) {
+    while (*a && *b) {
+        int ca = tolower((unsigned char)*a);
+        int cb = tolower((unsigned char)*b);
+        if (ca != cb) return ca - cb;
+        a++; b++;
+    }
+    return tolower((unsigned char)*a) - tolower((unsigned char)*b);
+}
+
+static int parse_color_name(const char *name) {
+    if (!name) return -1;
+    if (ci_strcmp(name, "black")   == 0) return COLOR_BLACK;
+    if (ci_strcmp(name, "red")     == 0) return COLOR_RED;
+    if (ci_strcmp(name, "green")   == 0) return COLOR_GREEN;
+    if (ci_strcmp(name, "yellow")  == 0) return COLOR_YELLOW;
+    if (ci_strcmp(name, "orange")  == 0) return COLOR_YELLOW;
+    if (ci_strcmp(name, "blue")    == 0) return COLOR_BLUE;
+    if (ci_strcmp(name, "magenta") == 0) return COLOR_MAGENTA;
+    if (ci_strcmp(name, "cyan")    == 0) return COLOR_CYAN;
+    if (ci_strcmp(name, "white")   == 0) return COLOR_WHITE;
+    if (ci_strcmp(name, "grey")    == 0 ||
+        ci_strcmp(name, "gray")    == 0) return COLOR_WHITE;
+    return -1;
+}
+
+static int parse_key_string(const char *s) {
+    if (!s || !*s) return -1;
+    if (s[0] == '^' && s[1]) {
+        if (s[1] == '/' && !s[2]) return KEY_CTRL_SLASH;
+        char c = s[1];
+        if (c >= 'a' && c <= 'z') c -= 32;
+        if (c >= '@' && c <= '_') return c & 0x1F;
+        return -1;
+    }
+    if (ci_strcmp(s, "Enter")     == 0) return '\n';
+    if (ci_strcmp(s, "Tab")       == 0) return '\t';
+    if (ci_strcmp(s, "Space")     == 0) return ' ';
+    if (ci_strcmp(s, "Backspace") == 0) return KEY_BACKSPACE;
+    if (ci_strcmp(s, "Delete")    == 0) return KEY_DC;
+    if (ci_strcmp(s, "Esc")       == 0) return 27;
+    if (ci_strcmp(s, "Escape")    == 0) return 27;
+    if (ci_strcmp(s, "Up")        == 0) return KEY_UP;
+    if (ci_strcmp(s, "Down")      == 0) return KEY_DOWN;
+    if (ci_strcmp(s, "Left")      == 0) return KEY_LEFT;
+    if (ci_strcmp(s, "Right")     == 0) return KEY_RIGHT;
+    if (ci_strcmp(s, "Home")      == 0) return KEY_HOME;
+    if (ci_strcmp(s, "End")       == 0) return KEY_END;
+    if (ci_strcmp(s, "PageUp")    == 0) return KEY_PPAGE;
+    if (ci_strcmp(s, "PageDown")  == 0) return KEY_NPAGE;
+    if (s[0] == 'F' && isdigit((unsigned char)s[1])) {
+        int n = atoi(s + 1);
+        if (n >= 1 && n <= 12) return KEY_F(n);
+    }
+    if (s[1] == '\0') return (unsigned char)s[0];
+    return -1;
+}
+
+static void set_default_config(void) {
+    g_cfg.show_lines          = 1;
+    g_cfg.color_lines_idx     = COLOR_GREEN;
+    g_cfg.use_nanorc          = 1;
+    g_cfg.show_hints          = 1;
+    g_cfg.assistant_color_idx = COLOR_CYAN;
+
+    g_cfg.hints_count = 0;
+    const char *default_hints[] = {
+        "Help", "Save", "SaveAs", "Find", "Cut", "Exit", "GotoLine"
+    };
+    for (size_t i = 0; i < sizeof(default_hints) / sizeof(default_hints[0]); i++) {
+        strncpy(g_cfg.hints_order[g_cfg.hints_count], default_hints[i], 31);
+        g_cfg.hints_order[g_cfg.hints_count][31] = '\0';
+        g_cfg.hints_count++;
+    }
+
+    for (int i = 0; i < ACT_COUNT; i++) {
+        strncpy(g_actions[i].key_str, g_actions[i].default_key, 15);
+        g_actions[i].key_str[15] = '\0';
+        g_actions[i].keycode = parse_key_string(g_actions[i].key_str);
+    }
+}
+
+static void load_lyerc(void) {
+    set_default_config();
+
+    const char *home = getenv("HOME");
+    if (!home) return;
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/.lyerc", home);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return;
+
+    char line[1024];
+    while (fgets(line, sizeof(line), fp)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        char *p = line;
+        while (isspace((unsigned char)*p)) p++;
+        if (*p == '\0' || *p == '#') continue;
+
+        char *eq = strchr(p, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char *key = p;
+        char *val = eq + 1;
+
+        char *end = key + strlen(key) - 1;
+        while (end > key && isspace((unsigned char)*end)) *end-- = '\0';
+        while (*val && isspace((unsigned char)*val)) val++;
+        end = val + strlen(val) - 1;
+        while (end > val && isspace((unsigned char)*end)) *end-- = '\0';
+
+        if (ci_strcmp(key, "ShowLines") == 0) {
+            g_cfg.show_lines = (ci_strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        } else if (ci_strcmp(key, "ColorLines") == 0) {
+            int c = parse_color_name(val);
+            if (c >= 0) g_cfg.color_lines_idx = c;
+        } else if (ci_strcmp(key, "UseNanorc") == 0) {
+            g_cfg.use_nanorc = (ci_strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        } else if (ci_strcmp(key, "ShowHints") == 0) {
+            g_cfg.show_hints = (ci_strcmp(val, "true") == 0 || strcmp(val, "1") == 0);
+        } else if (ci_strcmp(key, "AssistantColor") == 0) {
+            int c = parse_color_name(val);
+            if (c >= 0) g_cfg.assistant_color_idx = c;
+        } else if (ci_strcmp(key, "Hints") == 0) {
+            g_cfg.hints_count = 0;
+            char *copy = strdup(val);
+            if (!copy) continue;
+            char *tok = strtok(copy, ",");
+            while (tok && g_cfg.hints_count < MAX_HINTS) {
+                while (*tok && isspace((unsigned char)*tok)) tok++;
+                char *e = tok + strlen(tok) - 1;
+                while (e > tok && isspace((unsigned char)*e)) *e-- = '\0';
+                if (*tok) {
+                    strncpy(g_cfg.hints_order[g_cfg.hints_count], tok, 31);
+                    g_cfg.hints_order[g_cfg.hints_count][31] = '\0';
+                    g_cfg.hints_count++;
+                }
+                tok = strtok(NULL, ",");
+            }
+            free(copy);
+        } else {
+            for (int i = 0; i < ACT_COUNT; i++) {
+                if (ci_strcmp(key, g_actions[i].name) == 0) {
+                    int code = parse_key_string(val);
+                    if (code >= 0) {
+                        strncpy(g_actions[i].key_str, val, 15);
+                        g_actions[i].key_str[15] = '\0';
+                        g_actions[i].keycode = code;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    fclose(fp);
+
+    g_use_nanorc = g_cfg.use_nanorc;
+}
+
+static void build_hints_string(char *out, size_t out_size) {
+    out[0] = '\0';
+    if (!g_cfg.show_hints) return;
+
+    size_t used = 0;
+    for (int i = 0; i < g_cfg.hints_count; i++) {
+        int found = -1;
+        for (int j = 0; j < ACT_COUNT; j++) {
+            if (ci_strcmp(g_cfg.hints_order[i], g_actions[j].name) == 0) {
+                found = j;
+                break;
+            }
+        }
+        if (found < 0) continue;
+
+        const char *key   = g_actions[found].key_str;
+        const char *label = g_actions[found].hint_label;
+        int written = snprintf(out + used, out_size - used, "%s%s %s",
+                               used ? "  " : "", key, label);
+        if (written < 0 || (size_t)written >= out_size - used) break;
+        used += written;
+    }
+}
+
+/* ------------------------------------------------------------------------- */
+/* Utilidades base                                                           */
+/* ------------------------------------------------------------------------- */
 
 char *my_strdup(const char *s) {
     size_t len = strlen(s) + 1;
@@ -225,6 +468,10 @@ void draw_truncated_utf8(int y, int x, int max_bytes, const char *text) {
     mvaddnstr(y, x, text, (int)end);
 }
 
+/* ------------------------------------------------------------------------- */
+/* Ciclo de vida curses                                                      */
+/* ------------------------------------------------------------------------- */
+
 void init_curses(void) {
     initscr();
     raw();
@@ -233,12 +480,12 @@ void init_curses(void) {
     curs_set(1);
     if (has_colors()) {
         start_color();
-        use_default_colors();  // permite -1 en init_pair
+        use_default_colors();
         init_pair(1, COLOR_WHITE, COLOR_BLUE);
-        init_pair(2, COLOR_GREEN, COLOR_BLACK);
-        init_pair(3, COLOR_CYAN, COLOR_BLACK);
+        init_pair(2, g_cfg.color_lines_idx,     COLOR_BLACK);
+        init_pair(3, g_cfg.assistant_color_idx, COLOR_BLACK);
         init_pair(4, COLOR_BLACK, COLOR_WHITE);
-        init_pair(5, COLOR_RED, COLOR_BLACK);
+        init_pair(5, COLOR_RED,   COLOR_BLACK);
     }
 }
 
@@ -246,15 +493,22 @@ void cleanup(void) {
     endwin();
 }
 
+/* ------------------------------------------------------------------------- */
+/* Ajuste de vista                                                           */
+/* ------------------------------------------------------------------------- */
+
 void adjust_view(Editor *ed) {
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
     int edit_rows = rows - 3;
     int total_lines = ed->num_lines + 1;
-    int line_num_width = 1;
-    int temp = total_lines;
-    while (temp >= 10) { temp /= 10; line_num_width++; }
-    line_num_width++;
+    int line_num_width = 0;
+    if (g_cfg.show_lines) {
+        line_num_width = 1;
+        int temp = total_lines;
+        while (temp >= 10) { temp /= 10; line_num_width++; }
+        line_num_width++;
+    }
     int edit_cols = cols - line_num_width - 1;
 
     if (ed->cursor_y < ed->top_line) ed->top_line = ed->cursor_y;
@@ -266,14 +520,11 @@ void adjust_view(Editor *ed) {
     int block_width = edit_cols - 1;
     if (block_width <= 0) block_width = 1;
 
-    /* El renglón "extra" (cursor_y == num_lines) no existe en el buffer.
-     *      Hay que tratarlo como cadena vacía para no leer fuera de rango. */
     const char *cursor_line =
     (ed->cursor_y >= 0 && ed->cursor_y < ed->num_lines)
     ? ed->buffer[ed->cursor_y]
     : "";
 
-    /* Protección por si cursor_x quedara fuera de la línea (defensivo). */
     int clen = (int)strlen(cursor_line);
     if (ed->cursor_x > clen) ed->cursor_x = clen;
     if (ed->cursor_x < 0) ed->cursor_x = 0;
@@ -318,10 +569,10 @@ int check_resize_ncurses(Editor *ed) {
     return 0;
 }
 
-/* IMPORTANTE: free_buffer solo libera el buffer. NO debe tocar
- *  ed->syntax_rule ni ed->syntax_state, porque undo/redo lo usan para
- *  reemplazar el buffer y necesitan conservar el resaltado. La gestión
- *  del estado de sintaxis la hace set_current_syntax(). */
+/* ------------------------------------------------------------------------- */
+/* Memoria                                                                   */
+/* ------------------------------------------------------------------------- */
+
 void free_buffer(Editor *ed) {
     if (ed->buffer) {
         for (int i = 0; i < ed->num_lines; i++) free(ed->buffer[i]);
@@ -377,7 +628,6 @@ char **duplicate_buffer(Editor *ed, int *num_lines_out) {
 
 void push_history(Editor *ed) {
     if (ed->history.count >= ed->history.max) {
-        // Liberar la entrada más antigua
         for (int j = 0; j < ed->history.num_lines[0]; j++) free(ed->history.buffers[0][j]);
         free(ed->history.buffers[0]);
         memmove(ed->history.buffers, ed->history.buffers + 1, (ed->history.count - 1) * sizeof(char **));
@@ -430,7 +680,6 @@ void push_history(Editor *ed) {
     ed->history.count++;
     ed->history.index = ed->history.count - 1;
 
-    // Eliminar entradas futuras (redo)
     for (int i = ed->history.index + 1; i < ed->history.count; i++) {
         for (int j = 0; j < ed->history.num_lines[i]; j++) free(ed->history.buffers[i][j]);
         free(ed->history.buffers[i]);
@@ -465,7 +714,7 @@ void undo(Editor *ed) {
             draw_status_bar(ed, "Error al deshacer");
             return;
         }
-        free_buffer(ed);   // ya no toca syntax_rule/syntax_state
+        free_buffer(ed);
         ed->buffer = new_buffer;
         ed->num_lines = new_num_lines;
         ed->cursor_x = ed->history.cursor_x[ed->history.index];
@@ -493,7 +742,7 @@ void redo(Editor *ed) {
             draw_status_bar(ed, "Error al rehacer");
             return;
         }
-        free_buffer(ed);   // ya no toca syntax_rule/syntax_state
+        free_buffer(ed);
         ed->buffer = new_buffer;
         ed->num_lines = new_num_lines;
         ed->cursor_x = ed->history.cursor_x[ed->history.index];
@@ -511,6 +760,10 @@ void redo(Editor *ed) {
         draw_status_bar(ed, "Nada que rehacer");
     }
 }
+
+/* ------------------------------------------------------------------------- */
+/* Carga y guardado                                                          */
+/* ------------------------------------------------------------------------- */
 
 void load_file(Editor *ed, const char *filename) {
     struct stat st;
@@ -751,7 +1004,10 @@ int save_file(Editor *ed, const char *filename) {
     return 1;
 }
 
-/* Funciones auxiliares para UTF-8 */
+/* ------------------------------------------------------------------------- */
+/* UTF-8                                                                     */
+/* ------------------------------------------------------------------------- */
+
 int prev_char_pos(const char *s, int pos) {
     if (pos <= 0) return 0;
     pos--;
@@ -791,6 +1047,10 @@ void invalidate_syntax_cache(Editor *ed) {
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* Dibujo                                                                    */
+/* ------------------------------------------------------------------------- */
+
 void draw_screen(Editor *ed) {
     adjust_view(ed);
     int rows, cols;
@@ -815,10 +1075,13 @@ void draw_screen(Editor *ed) {
     attroff(A_REVERSE);
 
     int total_lines = ed->num_lines + 1;
-    int line_num_width = 1;
-    int temp = total_lines;
-    while (temp >= 10) { temp /= 10; line_num_width++; }
-    line_num_width++;
+    int line_num_width = 0;
+    if (g_cfg.show_lines) {
+        line_num_width = 1;
+        int temp = total_lines;
+        while (temp >= 10) { temp /= 10; line_num_width++; }
+        line_num_width++;
+    }
 
     int edit_rows = rows - 3;
     int edit_cols = cols - line_num_width - 1;
@@ -830,9 +1093,11 @@ void draw_screen(Editor *ed) {
         int line_index = ed->top_line + i;
         if (line_index >= total_lines) break;
         if (line_index < ed->num_lines) {
-            attron(COLOR_PAIR(2));
-            mvprintw(i + 1, 1, "%*d", line_num_width - 1, line_index + 1);
-            attroff(COLOR_PAIR(2));
+            if (g_cfg.show_lines) {
+                attron(COLOR_PAIR(2));
+                mvprintw(i + 1, 1, "%*d", line_num_width - 1, line_index + 1);
+                attroff(COLOR_PAIR(2));
+            }
 
             char *line = ed->buffer[line_index];
             int len = (int)strlen(line);
@@ -884,9 +1149,11 @@ void draw_screen(Editor *ed) {
                 attroff(COLOR_PAIR(2));
             }
         } else {
-            attron(COLOR_PAIR(2));
-            mvprintw(i + 1, 1, "%*d", line_num_width - 1, line_index + 1);
-            attroff(COLOR_PAIR(2));
+            if (g_cfg.show_lines) {
+                attron(COLOR_PAIR(2));
+                mvprintw(i + 1, 1, "%*d", line_num_width - 1, line_index + 1);
+                attroff(COLOR_PAIR(2));
+            }
         }
     }
 
@@ -903,17 +1170,11 @@ void draw_screen(Editor *ed) {
 
     attron(A_REVERSE);
     mvhline(rows - 1, 0, ' ', cols);
-    const char *shortcuts;
-    if (cols >= 90) {
-        shortcuts = "^G Ayuda  ^S Guardar ^O Guardar como ^F Buscar  ^K Cortar ^X Salir ^/ Ir línea ";
-    } else if (cols >= 60) {
-        shortcuts = "^G Ayuda  ^S Guardar ^F Buscar  ^K Cortar ^X Salir";
-    } else if (cols >= 30) {
-        shortcuts = "^G Ayuda ^S Guardar ^X Salir";
-    } else {
-        shortcuts = "^G Ayuda";
+    if (g_cfg.show_hints) {
+        char hints_buf[1024];
+        build_hints_string(hints_buf, sizeof(hints_buf));
+        draw_truncated_utf8(rows - 1, 1, cols - 2, hints_buf);
     }
-    draw_truncated_utf8(rows - 1, 1, cols - 2, shortcuts);
     attroff(A_REVERSE);
 
     int cursor_screen_y = ed->cursor_y - ed->top_line + 1;
@@ -985,6 +1246,10 @@ void print_help_text(void) {
         printf("%s\n", g_help_lines[i]);
     }
 }
+
+/* ------------------------------------------------------------------------- */
+/* Entrada de líneas                                                         */
+/* ------------------------------------------------------------------------- */
 
 int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen) {
     int rows, cols;
@@ -1068,7 +1333,7 @@ int read_line_from_user(Editor *ed, const char *prompt, char *buffer, int maxlen
             char mb[MB_CUR_MAX + 1];
             int len = wctomb(mb, (wchar_t)wc);
             if (len > 0) {
-                if (pos + len < maxlen - 1) {  // dejar espacio para '\0'
+                if (pos + len < maxlen - 1) {
                     memcpy(buffer + pos, mb, len);
                     pos += len;
                     buffer[pos] = '\0';
@@ -1101,6 +1366,10 @@ int read_filename_with_default(Editor *ed, const char *prompt, char *buffer, int
     }
     return result;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Edición                                                                   */
+/* ------------------------------------------------------------------------- */
 
 void insert_string(Editor *ed, const char *s) {
     if (!s || !*s) return;
@@ -1293,6 +1562,10 @@ void paste_clipboard(Editor *ed) {
     draw_status_bar(ed, "Pegado");
 }
 
+/* ------------------------------------------------------------------------- */
+/* Búsqueda y navegación                                                     */
+/* ------------------------------------------------------------------------- */
+
 void search(Editor *ed) {
     char pattern[256];
     if (read_line_from_user(ed, "Buscar: ", pattern, sizeof(pattern)) != OK) return;
@@ -1427,35 +1700,47 @@ void confirm_exit(Editor *ed) {
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* Manejo de entrada                                                         */
+/* ------------------------------------------------------------------------- */
+
 void handle_input(Editor *ed, int ch) {
-    switch (ch) {
-        case KEY_CTRL('G'): show_help(ed); break;
-        case KEY_CTRL_S:
-            if (ed->filename) save_file(ed, ed->filename);
-            else {
-                char filename[256] = "";
-                if (read_line_from_user(ed, "Nombre de archivo: ", filename, sizeof(filename)) == OK)
-                    save_file(ed, filename);
-            }
-            break;
-        case KEY_CTRL('O'): {
+    /* Acciones configurables vía ~/.lyerc */
+    if (ch == g_actions[ACT_HELP].keycode) {
+        show_help(ed);
+        return;
+    }
+    if (ch == g_actions[ACT_SAVE].keycode) {
+        if (ed->filename) save_file(ed, ed->filename);
+        else {
             char filename[256] = "";
-            if (read_filename_with_default(ed, "Nombre de archivo", filename, sizeof(filename), ed->filename) == OK)
+            if (read_line_from_user(ed, "Nombre de archivo: ", filename, sizeof(filename)) == OK)
                 save_file(ed, filename);
-            break;
         }
-        case KEY_CTRL('F'): search(ed); break;
-        case KEY_CTRL('W'): search_next(ed); break;
-        case KEY_CTRL('K'): cut_line(ed); break;
-        case KEY_CTRL('U'): paste_clipboard(ed); break;
-        case KEY_CTRL('Z'): undo(ed); break;
-        case KEY_CTRL('Y'): redo(ed); break;
-        case KEY_CTRL_SLASH: goto_line(ed); break;
-        case KEY_CTRL('X'): confirm_exit(ed); break;
-        case KEY_CTRL('L'):
-            clearok(stdscr, TRUE);
-            draw_screen(ed);
-            break;
+        return;
+    }
+    if (ch == g_actions[ACT_SAVE_AS].keycode) {
+        char filename[256] = "";
+        if (read_filename_with_default(ed, "Nombre de archivo", filename, sizeof(filename), ed->filename) == OK)
+            save_file(ed, filename);
+        return;
+    }
+    if (ch == g_actions[ACT_FIND].keycode)      { search(ed);       return; }
+    if (ch == g_actions[ACT_FIND_NEXT].keycode) { search_next(ed);  return; }
+    if (ch == g_actions[ACT_CUT].keycode)       { cut_line(ed);     return; }
+    if (ch == g_actions[ACT_PASTE].keycode)     { paste_clipboard(ed); return; }
+    if (ch == g_actions[ACT_UNDO].keycode)      { undo(ed);         return; }
+    if (ch == g_actions[ACT_REDO].keycode)      { redo(ed);         return; }
+    if (ch == g_actions[ACT_GOTO].keycode)      { goto_line(ed);    return; }
+    if (ch == g_actions[ACT_EXIT].keycode)      { confirm_exit(ed); return; }
+    if (ch == g_actions[ACT_REFRESH].keycode) {
+        clearok(stdscr, TRUE);
+        draw_screen(ed);
+        return;
+    }
+
+    /* Movimiento y edición (no configurables) */
+    switch (ch) {
         case KEY_LEFT:
             if (ed->cursor_y < ed->num_lines && ed->cursor_x > 0)
                 ed->cursor_x = prev_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x);
@@ -1548,8 +1833,15 @@ void handle_input(Editor *ed, int ch) {
     }
 }
 
+/* ------------------------------------------------------------------------- */
+/* main                                                                      */
+/* ------------------------------------------------------------------------- */
+
 int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
+
+    /* Cargar ~/.lyerc (si no existe, se usan valores por defecto) */
+    load_lyerc();
 
     int filename_index = -1;
     for (int i = 1; i < argc; i++) {
@@ -1594,7 +1886,9 @@ int main(int argc, char *argv[]) {
     init_curses();
     global_ed = &ed;
 
-    init_syntax_highlighting();
+    if (g_cfg.use_nanorc) {
+        init_syntax_highlighting();
+    }
 
     if (filename_index != -1) {
         load_file(&ed, argv[filename_index]);
