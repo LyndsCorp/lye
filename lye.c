@@ -38,11 +38,11 @@ typedef enum {
 } ActionId;
 
 typedef struct {
-    const char *name;        /* clave en ~/.lyerc               */
-    const char *hint_label;  /* etiqueta mostrada en la barra   */
-    const char *default_key; /* valor por defecto               */
-    char key_str[16];        /* valor efectivo                  */
-    int  keycode;            /* código resuelto                 */
+    const char *name;
+    const char *hint_label;
+    const char *default_key;
+    char key_str[16];
+    int  keycode;
 } ActionDef;
 
 static ActionDef g_actions[ACT_COUNT] = {
@@ -63,13 +63,13 @@ static ActionDef g_actions[ACT_COUNT] = {
 #define MAX_HINTS 32
 
 typedef struct {
-    int  show_lines;             /* ShowLines       */
-    int  color_lines_idx;        /* ColorLines      */
-    int  use_nanorc;             /* UseNanorc       */
-    int  show_hints;             /* ShowHints       */
+    int  show_lines;
+    int  color_lines_idx;
+    int  use_nanorc;
+    int  show_hints;
     char hints_order[MAX_HINTS][32];
     int  hints_count;
-    int  assistant_color_idx;    /* AssistantColor  */
+    int  assistant_color_idx;
 } LyeConfig;
 
 static LyeConfig g_cfg;
@@ -494,6 +494,46 @@ void cleanup(void) {
 }
 
 /* ------------------------------------------------------------------------- */
+/* Ancho de columnas (independiente del locale)                              */
+/* ------------------------------------------------------------------------- */
+
+/* Cuenta columnas como codepoints. 1 codepoint = 1 columna. Determinista.
+ * Válido para scripts latinos/griegos/cirílicos. No maneja CJK. */
+static int cols_of(const char *line, int byte_len) {
+    if (byte_len <= 0) return 0;
+    int i = 0, cols = 0;
+    while (i < byte_len) {
+        unsigned char c = (unsigned char)line[i];
+        int l;
+        if (c < 0x80) l = 1;
+        else if ((c & 0xE0) == 0xC0) l = 2;
+        else if ((c & 0xF0) == 0xE0) l = 3;
+        else if ((c & 0xF8) == 0xF0) l = 4;
+        else l = 1;
+        if (i + l > byte_len) break;
+        i += l;
+        cols++;
+    }
+    return cols;
+}
+
+/* Devuelve cuántos bytes de 'line' a partir de start_byte cubren
+ * exactamente max_cols columnas (1 codepoint = 1 columna). */
+static int bytes_for_cols(const char *line, int start_byte, int max_cols) {
+    int len = (int)strlen(line);
+    int pos = start_byte;
+    int cols = 0;
+    while (pos < len && cols < max_cols) {
+        int next = next_char_pos(line, pos, len);
+        int l = next - pos;
+        if (l <= 0 || l >= 8) break;
+        pos = next;
+        cols++;
+    }
+    return pos - start_byte;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Ajuste de vista                                                           */
 /* ------------------------------------------------------------------------- */
 
@@ -517,7 +557,6 @@ void adjust_view(Editor *ed) {
     if (ed->top_line > total_lines - edit_rows) ed->top_line = total_lines - edit_rows;
     if (ed->top_line < 0) ed->top_line = 0;
 
-    /* El renglón "extra" (cursor_y == num_lines) no existe en el buffer. */
     const char *cursor_line =
     (ed->cursor_y >= 0 && ed->cursor_y < ed->num_lines)
     ? ed->buffer[ed->cursor_y]
@@ -528,49 +567,39 @@ void adjust_view(Editor *ed) {
     if (ed->cursor_x < 0) ed->cursor_x = 0;
 
     /* Ancho de una "página" horizontal: dos columnas menos que el ancho
-     * de edición, para dejar sitio a los marcadores '<' y '>'. Este es
-     * el tamaño del salto, en cualquier dirección. */
+     * de edición, para dejar sitio a los marcadores '<' y '>'. */
     int page_width = edit_cols - 2;
     if (page_width < 1) page_width = 1;
 
-    int vis_width = visual_width_until(cursor_line, ed->cursor_x);
-    int left_vis  = visual_width_until(cursor_line, ed->left_col);
+    int vis_width = cols_of(cursor_line, ed->cursor_x);
+    int left_vis  = cols_of(cursor_line, ed->left_col);
 
     /* Comportamiento nano 8.4 (solosidescroll): la línea del cursor
      * salta una página completa cuando el cursor sale del viewport
-     * horizontal, tanto hacia la derecha como hacia la izquierda.
-     * left_col siempre queda alineado a un múltiplo de page_width. */
+     * horizontal, tanto hacia la derecha como hacia la izquierda. */
     int needs_jump = 0;
-    if (vis_width >= left_vis + page_width) needs_jump = 1;   /* hacia la derecha */
-        if (vis_width < left_vis)              needs_jump = 1;    /* hacia la izquierda */
+    if (vis_width >= left_vis + page_width) needs_jump = 1;
+    if (vis_width <  left_vis)              needs_jump = 1;
 
-            if (needs_jump) {
-                int page = vis_width / page_width;
-                int target_visual = page * page_width;
+    if (needs_jump) {
+        int page = vis_width / page_width;
+        int target_visual = page * page_width;
 
-                /* Convertir la columna visual objetivo a offset de byte dentro
-                 * de la línea (maneja UTF-8 correctamente). */
-                int byte_off = 0;
-                int w = 0;
-                while (byte_off < clen) {
-                    int next = next_char_pos(cursor_line, byte_off, clen);
-                    char tmp[8];
-                    int l = next - byte_off;
-                    if (l <= 0 || l >= (int)sizeof(tmp)) break;
-                    memcpy(tmp, cursor_line + byte_off, l);
-                    tmp[l] = '\0';
-                    wchar_t wc;
-                    if (mbtowc(&wc, tmp, l) < 0) break;
-                    int cw = wcwidth(wc);
-                    if (cw < 0) cw = 0;
-                    if (w + cw > target_visual) break;
-                    w += cw;
-                    byte_off = next;
-                }
-                ed->left_col = byte_off;
-            }
+        /* Convertir la columna visual objetivo a offset de byte. */
+        int byte_off = 0;
+        int w = 0;
+        while (byte_off < clen) {
+            int next = next_char_pos(cursor_line, byte_off, clen);
+            int l = next - byte_off;
+            if (l <= 0 || l >= 8) break;
+            if (w + 1 > target_visual) break;
+            w += 1;
+            byte_off = next;
+        }
+        ed->left_col = byte_off;
+    }
 
-            if (ed->left_col < 0) ed->left_col = 0;
+    if (ed->left_col < 0) ed->left_col = 0;
 }
 
 int check_resize_ncurses(Editor *ed) {
@@ -643,7 +672,6 @@ char **duplicate_buffer(Editor *ed, int *num_lines_out) {
 
 void push_history(Editor *ed) {
     if (ed->history.count >= ed->history.max) {
-        // Liberar la entrada más antigua
         for (int j = 0; j < ed->history.num_lines[0]; j++) free(ed->history.buffers[0][j]);
         free(ed->history.buffers[0]);
         memmove(ed->history.buffers, ed->history.buffers + 1, (ed->history.count - 1) * sizeof(char **));
@@ -654,9 +682,7 @@ void push_history(Editor *ed) {
         if (ed->history.index > 0) ed->history.index--;
     }
 
-    /* Truncar las entradas de redo pendientes antes de añadir una nueva.
-     * Sin esto, tras varios undo() los estados "futuros" quedaban vivos
-     * y redo() podía alcanzarlos aunque el usuario ya hubiera editado. */
+    /* Truncar las entradas de redo pendientes antes de añadir una nueva. */
     if (ed->history.index >= 0 && ed->history.index < ed->history.count - 1) {
         for (int i = ed->history.index + 1; i < ed->history.count; i++) {
             for (int j = 0; j < ed->history.num_lines[i]; j++)
@@ -1046,17 +1072,7 @@ int next_char_pos(const char *s, int pos, int len) {
 }
 
 int visual_width_until(const char *line, int pos) {
-    if (pos <= 0) return 0;
-    char *tmp = strndup(line, pos);
-    if (!tmp) return 0;
-    wchar_t *wcs = calloc(pos + 1, sizeof(wchar_t));
-    if (!wcs) { free(tmp); return 0; }
-    size_t n = mbstowcs(wcs, tmp, pos);
-    int width = 0;
-    if (n != (size_t)-1) width = wcswidth(wcs, n);
-    free(tmp);
-    free(wcs);
-    return width;
+    return cols_of(line, pos);
 }
 
 void invalidate_syntax_cache(Editor *ed) {
@@ -1116,8 +1132,6 @@ void draw_screen(Editor *ed) {
         int line_index = ed->top_line + i;
         if (line_index >= total_lines) break;
 
-        /* Solo la línea del cursor usa ed->left_col. Las demás líneas
-         * siempre empiezan en columna 0 (nano 8.4 / solosidescroll). */
         int is_cursor_line = (line_index == ed->cursor_y);
         int line_left_col = is_cursor_line ? ed->left_col : 0;
 
@@ -1132,15 +1146,21 @@ void draw_screen(Editor *ed) {
             int len = (int)strlen(line);
 
             int has_left_marker = (line_left_col > 0);
-            int has_right_marker = (len > line_left_col + edit_cols - (has_left_marker ? 1 : 0));
 
-            int max_text_width = edit_cols - (has_left_marker ? 1 : 0) - (has_right_marker ? 1 : 0);
+            int full_cols      = cols_of(line, len);
+            int left_cols_skip = cols_of(line, line_left_col);
+            int remaining      = full_cols - left_cols_skip;
+            if (remaining < 0) remaining = 0;
+
+            int avail_cols = edit_cols - (has_left_marker ? 1 : 0);
+            if (avail_cols < 0) avail_cols = 0;
+
+            int has_right_marker = (remaining > avail_cols);
+            if (has_right_marker) avail_cols -= 1;
+            if (avail_cols < 0) avail_cols = 0;
+
             int start_x = line_num_width + 1;
-            int text_x = start_x + (has_left_marker ? 1 : 0);
-
-            int visible_len = len - line_left_col;
-            if (visible_len < 0) visible_len = 0;
-            if (visible_len > max_text_width) visible_len = max_text_width;
+            int text_x  = start_x + (has_left_marker ? 1 : 0);
 
             if (has_left_marker) {
                 attron(COLOR_PAIR(2));
@@ -1148,33 +1168,65 @@ void draw_screen(Editor *ed) {
                 attroff(COLOR_PAIR(2));
             }
 
-            if (visible_len > 0) {
-                apply_syntax_to_line(ed, line_index, line_left_col, visible_len,
-                                     segments, &seg_count);
-                int cur_x = text_x;
-                for (int s = 0; s < seg_count; s += 4) {
-                    int seg_start = segments[s];
-                    int seg_end = segments[s + 1];
-                    int pair = segments[s + 2];
-                    int attrs = segments[s + 3];
-                    if (seg_end > seg_start) {
-                        if (pair && has_colors()) attron(COLOR_PAIR(pair));
-                        if (attrs) attron(attrs);
-                        mvaddnstr(i + 1, cur_x, line + seg_start, seg_end - seg_start);
-                        if (attrs) attroff(attrs);
-                        if (pair && has_colors()) attroff(COLOR_PAIR(pair));
-                        cur_x += seg_end - seg_start;
+            if (avail_cols > 0 && remaining > 0) {
+                int visible_bytes = bytes_for_cols(line, line_left_col, avail_cols);
+                if (visible_bytes > 0) {
+                    apply_syntax_to_line(ed, line_index, line_left_col, visible_bytes,
+                                         segments, &seg_count);
+                    int cur_x = text_x;
+                    int cur_col = 0;
+
+                    if (seg_count == 0) {
+                        int byte_pos = line_left_col;
+                        int end_pos  = line_left_col + visible_bytes;
+                        while (byte_pos < end_pos && cur_col < avail_cols) {
+                            int next = next_char_pos(line, byte_pos, len);
+                            int l = next - byte_pos;
+                            if (l <= 0 || l >= 8) break;
+                            char tmp[8];
+                            memcpy(tmp, line + byte_pos, l);
+                            tmp[l] = '\0';
+                            mvaddstr(i + 1, cur_x, tmp);
+                            cur_x += 1;
+                            cur_col += 1;
+                            byte_pos = next;
+                        }
+                    } else {
+                        for (int s = 0; s < seg_count; s += 4) {
+                            int seg_start = segments[s];
+                            int seg_end   = segments[s + 1];
+                            int pair      = segments[s + 2];
+                            int attrs     = segments[s + 3];
+                            if (seg_end <= seg_start) continue;
+
+                            if (pair && has_colors()) attron(COLOR_PAIR(pair));
+                            if (attrs) attron(attrs);
+
+                            int byte_pos = seg_start;
+                            while (byte_pos < seg_end && cur_col < avail_cols) {
+                                int next = next_char_pos(line, byte_pos, len);
+                                int l = next - byte_pos;
+                                if (l <= 0 || l >= 8) break;
+                                if (byte_pos + l > seg_end) break;
+                                char tmp[8];
+                                memcpy(tmp, line + byte_pos, l);
+                                tmp[l] = '\0';
+                                mvaddstr(i + 1, cur_x, tmp);
+                                cur_x += 1;
+                                cur_col += 1;
+                                byte_pos = next;
+                            }
+
+                            if (attrs) attroff(attrs);
+                            if (pair && has_colors()) attroff(COLOR_PAIR(pair));
+                        }
                     }
-                }
-                if (seg_count == 0) {
-                    mvaddnstr(i + 1, text_x, line + line_left_col, visible_len);
                 }
             }
 
             if (has_right_marker) {
-                int right_marker_x = start_x + edit_cols - 1;
                 attron(COLOR_PAIR(2));
-                mvaddch(i + 1, right_marker_x, '>');
+                mvaddch(i + 1, text_x + avail_cols, '>');
                 attroff(COLOR_PAIR(2));
             }
         } else {
@@ -1212,8 +1264,8 @@ void draw_screen(Editor *ed) {
         cursor_screen_x = line_num_width + 1;
     } else {
         int has_left_marker = (ed->left_col > 0);
-        int visual_pos = visual_width_until(ed->buffer[ed->cursor_y], ed->cursor_x) -
-        visual_width_until(ed->buffer[ed->cursor_y], ed->left_col);
+        int visual_pos = cols_of(ed->buffer[ed->cursor_y], ed->cursor_x) -
+        cols_of(ed->buffer[ed->cursor_y], ed->left_col);
         cursor_screen_x = line_num_width + 1 + (has_left_marker ? 1 : 0) + visual_pos;
     }
     if (cursor_screen_y >= 1 && cursor_screen_y <= edit_rows) {
@@ -1734,7 +1786,6 @@ void confirm_exit(Editor *ed) {
 /* ------------------------------------------------------------------------- */
 
 void handle_input(Editor *ed, int ch) {
-    /* Acciones configurables vía ~/.lyerc */
     if (ch == g_actions[ACT_HELP].keycode) {
         show_help(ed);
         return;
@@ -1768,7 +1819,6 @@ void handle_input(Editor *ed, int ch) {
         return;
     }
 
-    /* Movimiento y edición (no configurables) */
     switch (ch) {
         case KEY_LEFT:
             if (ed->cursor_y < ed->num_lines && ed->cursor_x > 0)
@@ -1828,7 +1878,25 @@ void handle_input(Editor *ed, int ch) {
             ed->left_col = 0;
         adjust_view(ed);
         break;
-        case KEY_BACKSPACE: case 127: case 8: delete_char(ed); break;
+        case KEY_BACKSPACE: case 127: case 8:
+            /* Si estamos pegados al marcador '<' de la línea del cursor,
+             * Backspace se comporta como la flecha izquierda (salto de
+             * página) en lugar de borrar. */
+            if (ed->left_col > 0 &&
+                ed->cursor_x <= ed->left_col &&
+                ed->cursor_y < ed->num_lines) {
+                if (ed->cursor_x > 0) {
+                    ed->cursor_x = prev_char_pos(ed->buffer[ed->cursor_y], ed->cursor_x);
+                } else if (ed->cursor_y > 0) {
+                    ed->cursor_y--;
+                    ed->cursor_x = (int)strlen(ed->buffer[ed->cursor_y]);
+                    ed->left_col = 0;
+                }
+                adjust_view(ed);
+                } else {
+                    delete_char(ed);
+                }
+                break;
         case KEY_DC:
             if (ed->cursor_y < ed->num_lines && ed->cursor_x < (int)strlen(ed->buffer[ed->cursor_y])) {
                 push_history(ed);
@@ -1869,7 +1937,6 @@ void handle_input(Editor *ed, int ch) {
 int main(int argc, char *argv[]) {
     setlocale(LC_ALL, "");
 
-    /* Cargar ~/.lyerc (si no existe, se usan valores por defecto) */
     load_lyerc();
 
     int filename_index = -1;
@@ -1956,9 +2023,6 @@ int main(int argc, char *argv[]) {
                 int ch = (int)wc;
                 handle_input(&ed, ch);
             } else {
-                /* ¿Es un atajo configurado que usa un carácter imprimible?
-                 * Si el usuario puso Cut=k en ~/.lyerc, hay que darle
-                 * prioridad sobre la inserción de texto. */
                 int matched = 0;
                 for (int i = 0; i < ACT_COUNT; i++) {
                     if (g_actions[i].keycode == (int)wc) {
