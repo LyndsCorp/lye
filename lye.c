@@ -517,9 +517,7 @@ void adjust_view(Editor *ed) {
     if (ed->top_line > total_lines - edit_rows) ed->top_line = total_lines - edit_rows;
     if (ed->top_line < 0) ed->top_line = 0;
 
-    int block_width = edit_cols - 1;
-    if (block_width <= 0) block_width = 1;
-
+    /* El renglón "extra" (cursor_y == num_lines) no existe en el buffer. */
     const char *cursor_line =
     (ed->cursor_y >= 0 && ed->cursor_y < ed->num_lines)
     ? ed->buffer[ed->cursor_y]
@@ -529,33 +527,50 @@ void adjust_view(Editor *ed) {
     if (ed->cursor_x > clen) ed->cursor_x = clen;
     if (ed->cursor_x < 0) ed->cursor_x = 0;
 
-    if (ed->cursor_x < ed->left_col) {
-        ed->left_col = ed->cursor_x;
-    }
+    /* Ancho de una "página" horizontal: dos columnas menos que el ancho
+     * de edición, para dejar sitio a los marcadores '<' y '>'. Este es
+     * el tamaño del salto, en cualquier dirección. */
+    int page_width = edit_cols - 2;
+    if (page_width < 1) page_width = 1;
+
     int vis_width = visual_width_until(cursor_line, ed->cursor_x);
-    if (vis_width >= ed->left_col + block_width) {
-        int target = vis_width - block_width + 1;
-        int byte_off = 0;
-        const char *line = cursor_line;
-        int w = 0;
-        while (byte_off < ed->cursor_x && byte_off < clen) {
-            int next = next_char_pos(line, byte_off, clen);
-            char tmp[8];
-            int l = next - byte_off;
-            if (l <= 0 || l >= (int)sizeof(tmp)) break;
-            memcpy(tmp, line + byte_off, l);
-            tmp[l] = '\0';
-            wchar_t wc;
-            if (mbtowc(&wc, tmp, l) < 0) break;
-            int cw = wcwidth(wc);
-            if (cw < 0) cw = 0;
-            if (w + cw > target) break;
-            w += cw;
-            byte_off = next;
-        }
-        ed->left_col = byte_off;
-    }
-    if (ed->left_col < 0) ed->left_col = 0;
+    int left_vis  = visual_width_until(cursor_line, ed->left_col);
+
+    /* Comportamiento nano 8.4 (solosidescroll): la línea del cursor
+     * salta una página completa cuando el cursor sale del viewport
+     * horizontal, tanto hacia la derecha como hacia la izquierda.
+     * left_col siempre queda alineado a un múltiplo de page_width. */
+    int needs_jump = 0;
+    if (vis_width >= left_vis + page_width) needs_jump = 1;   /* hacia la derecha */
+        if (vis_width < left_vis)              needs_jump = 1;    /* hacia la izquierda */
+
+            if (needs_jump) {
+                int page = vis_width / page_width;
+                int target_visual = page * page_width;
+
+                /* Convertir la columna visual objetivo a offset de byte dentro
+                 * de la línea (maneja UTF-8 correctamente). */
+                int byte_off = 0;
+                int w = 0;
+                while (byte_off < clen) {
+                    int next = next_char_pos(cursor_line, byte_off, clen);
+                    char tmp[8];
+                    int l = next - byte_off;
+                    if (l <= 0 || l >= (int)sizeof(tmp)) break;
+                    memcpy(tmp, cursor_line + byte_off, l);
+                    tmp[l] = '\0';
+                    wchar_t wc;
+                    if (mbtowc(&wc, tmp, l) < 0) break;
+                    int cw = wcwidth(wc);
+                    if (cw < 0) cw = 0;
+                    if (w + cw > target_visual) break;
+                    w += cw;
+                    byte_off = next;
+                }
+                ed->left_col = byte_off;
+            }
+
+            if (ed->left_col < 0) ed->left_col = 0;
 }
 
 int check_resize_ncurses(Editor *ed) {
@@ -1100,6 +1115,12 @@ void draw_screen(Editor *ed) {
     for (int i = 0; i < edit_rows; i++) {
         int line_index = ed->top_line + i;
         if (line_index >= total_lines) break;
+
+        /* Solo la línea del cursor usa ed->left_col. Las demás líneas
+         * siempre empiezan en columna 0 (nano 8.4 / solosidescroll). */
+        int is_cursor_line = (line_index == ed->cursor_y);
+        int line_left_col = is_cursor_line ? ed->left_col : 0;
+
         if (line_index < ed->num_lines) {
             if (g_cfg.show_lines) {
                 attron(COLOR_PAIR(2));
@@ -1110,14 +1131,14 @@ void draw_screen(Editor *ed) {
             char *line = ed->buffer[line_index];
             int len = (int)strlen(line);
 
-            int has_left_marker = (ed->left_col > 0);
-            int has_right_marker = (len > ed->left_col + edit_cols - (has_left_marker ? 1 : 0));
+            int has_left_marker = (line_left_col > 0);
+            int has_right_marker = (len > line_left_col + edit_cols - (has_left_marker ? 1 : 0));
 
             int max_text_width = edit_cols - (has_left_marker ? 1 : 0) - (has_right_marker ? 1 : 0);
             int start_x = line_num_width + 1;
             int text_x = start_x + (has_left_marker ? 1 : 0);
 
-            int visible_len = len - ed->left_col;
+            int visible_len = len - line_left_col;
             if (visible_len < 0) visible_len = 0;
             if (visible_len > max_text_width) visible_len = max_text_width;
 
@@ -1128,7 +1149,7 @@ void draw_screen(Editor *ed) {
             }
 
             if (visible_len > 0) {
-                apply_syntax_to_line(ed, line_index, ed->left_col, visible_len,
+                apply_syntax_to_line(ed, line_index, line_left_col, visible_len,
                                      segments, &seg_count);
                 int cur_x = text_x;
                 for (int s = 0; s < seg_count; s += 4) {
@@ -1146,7 +1167,7 @@ void draw_screen(Editor *ed) {
                     }
                 }
                 if (seg_count == 0) {
-                    mvaddnstr(i + 1, text_x, line + ed->left_col, visible_len);
+                    mvaddnstr(i + 1, text_x, line + line_left_col, visible_len);
                 }
             }
 
