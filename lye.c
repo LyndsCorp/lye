@@ -2,7 +2,7 @@
  * lye - Lynds Editor
  * Editor de texto TUI en C11 inspirado en GNU nano.
  * Copyright (C) 2026 David Baña Szymaniak
- */
+*/
 
 #define _GNU_SOURCE
 
@@ -24,7 +24,7 @@
 #define KEY_CTRL_SLASH 0x1F
 #define KEY_CTRL_S     19
 
-#define VERSION "1.0"
+#define VERSION "1.0.1"
 #define EDITION "lye - Lynds Editor\nPrimera versión de lye.\n¡Espero que te guste! :)"
 
 /* ------------------------------------------------------------------------- */
@@ -886,6 +886,44 @@ void load_file(Editor *ed, const char *filename) {
         }
     }
 
+    /* Si la ruta es una carpeta, no se puede abrir como archivo. */
+    if (S_ISDIR(st.st_mode)) {
+        char error_msg[512];
+        snprintf(error_msg, sizeof(error_msg),
+                 "«%s» es una carpeta, no se puede abrir como archivo.", filename);
+
+        free_buffer(ed);
+        ed->buffer = malloc(sizeof(char *));
+        if (!ed->buffer) {
+            draw_status_bar(ed, "Error de memoria");
+            return;
+        }
+        ed->buffer[0] = my_strdup("");
+        if (!ed->buffer[0]) {
+            free(ed->buffer);
+            ed->buffer = NULL;
+            draw_status_bar(ed, "Error de memoria");
+            return;
+        }
+        ed->num_lines = 1;
+        free(ed->filename);
+        ed->filename = NULL;          /* búfer nuevo, sin nombre asociado */
+        ed->modified = 0;
+        ed->cursor_x = 0;
+        ed->cursor_y = 0;
+        ed->top_line = 0;
+        ed->left_col = 0;
+        ed->readonly = 0;
+        ed->original_mode = 0644;
+        ed->welcome_shown = 0;
+        set_current_syntax(ed, NULL);
+        reset_syntax_state(ed);
+        invalidate_syntax_cache(ed);
+        draw_status_bar(ed, error_msg);
+        adjust_view(ed);
+        return;
+    }
+
     FILE *fp = fopen(filename, "r");
     if (!fp) {
         char error_msg[512];
@@ -997,6 +1035,12 @@ int save_file(Editor *ed, const char *filename) {
 
     struct stat st;
     if (stat(filename, &st) == 0) {
+        /* No permitir guardar sobre una carpeta. */
+        if (S_ISDIR(st.st_mode)) {
+            draw_status_bar(ed, "No se puede guardar: la ruta es una carpeta");
+            return 0;
+        }
+
         old_mode = st.st_mode & 07777;
         if (!(old_mode & S_IWUSR)) {
             if (chmod(filename, old_mode | S_IWUSR) != 0) {
